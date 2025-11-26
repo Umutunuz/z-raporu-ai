@@ -9,12 +9,11 @@ import cv2
 import os
 
 # --- SAYFA AYARLARI ---
-st.set_page_config(page_title="Z Raporu AI (V93 - Çelik Yelek)", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="Z Raporu AI (V94 - Yapısal Denetçi)", page_icon="🏗️", layout="wide")
 
 # --- PADDLE OCR MOTORU ---
 @st.cache_resource
 def load_paddle():
-    # use_angle_cls=True: Yamuk fişleri düzeltir
     return PaddleOCR(use_angle_cls=True, lang='tr')
 
 try:
@@ -26,7 +25,6 @@ except Exception as e:
 # --- GÖRÜNTÜ İŞLEME ---
 def resmi_hazirla(pil_image):
     image = np.array(pil_image)
-    # Gri tonlama
     if len(image.shape) == 3:
         gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
     else:
@@ -51,24 +49,33 @@ def sayi_temizle(text):
         pass
     return 0.0
 
-# --- SATIR BİRLEŞTİRİCİ (GÜVENLİK KALKANI EKLENDİ) ---
+# --- SATIR BİRLEŞTİRİCİ (GÜÇLENDİRİLMİŞ) ---
 def paddle_sonuclari_duzenle(results):
-    # --- GÜVENLİK KONTROLÜ BAŞLANGIÇ ---
-    if results is None: return []
-    if len(results) == 0: return []
-    if results[0] is None: return []
-    # ------------------------------------
+    # 1. Boş Veri Kontrolü
+    if results is None or len(results) == 0 or results[0] is None:
+        return []
     
-    # PaddleOCR formatı: [ [ [ [x,y]..], (text, conf)], ... ]
-    # results[0] listenin kendisidir.
     ocr_data = results[0]
     
-    # Eğer liste boşsa dön
-    if not ocr_data: return []
-
-    # Y'ye göre sırala
-    sorted_res = sorted(ocr_data, key=lambda x: x[0][0][1])
+    # 2. Yapısal Doğrulama (Bozuk verileri temizle)
+    temiz_veri = []
+    for item in ocr_data:
+        # item yapısı: [ [[x,y],..], ("text", conf) ]
+        # En az 2 elemanı olmalı ve koordinatları tam olmalı
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            box = item[0]
+            text_info = item[1]
+            if isinstance(box, (list, tuple)) and len(box) >= 1:
+                temiz_veri.append(item)
     
+    if not temiz_veri: return []
+
+    # 3. Sıralama ve Birleştirme
+    try:
+        sorted_res = sorted(temiz_veri, key=lambda x: x[0][0][1])
+    except:
+        return [] # Sıralamada hata olursa boş dön
+
     satirlar = []
     mevcut_satir = [sorted_res[0]]
     mevcut_y = sorted_res[0][0][0][1]
@@ -201,7 +208,7 @@ def veri_analiz(satirlar):
     return veriler
 
 # --- ARAYÜZ ---
-st.title("🛡️ Z Raporu AI - V93 (Çökme Korumalı)")
+st.title("🏗️ Z Raporu AI - V94 (Yapısal Denetçi)")
 
 tab1, tab2 = st.tabs(["📁 Dosya Yükle", "📷 Kamera"])
 resimler = []
@@ -228,10 +235,6 @@ if resimler:
                 result = reader.ocr(img_np)
                 satirlar = paddle_sonuclari_duzenle(result)
                 
-                # Kara Kutu (Hata ayıklamak istersen aç)
-                # with st.expander(f"🔍 AI Gözü: {name}"):
-                #    st.code("\n".join(satirlar))
-                
                 veri = veri_analiz(satirlar)
                 veri['Dosya'] = name
                 
@@ -240,8 +243,8 @@ if resimler:
                 
                 tum_veriler.append(veri)
             except Exception as e:
-                # Hata olsa bile devam et, sadece uyarı ver
-                st.warning(f"Bir dosya okunamadı: {name}. Sebep: {e}")
+                # HATA DURUMUNDA BOŞ SATIR EKLE AMA ÇÖKME
+                st.warning(f"Okuma Hatası: {name} - Lütfen fotoğrafı kontrol edin.")
             
             bar.progress((i+1)/len(resimler))
             
@@ -249,7 +252,6 @@ if resimler:
         if not df.empty:
             cols = ["Durum", "Tarih", "Z_No", "Toplam", "Nakit", "Kredi", "KDV", "Matrah_0", "Matrah_1", "Matrah_10", "Matrah_20", "Dosya"]
             mevcut = [c for c in cols if c in df.columns]
-            
             st.dataframe(df[mevcut], use_container_width=True)
             
             buffer = io.BytesIO()
