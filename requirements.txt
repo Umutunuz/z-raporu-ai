@@ -5,3 +5,4 @@ easyocr
 opencv-python-headless
 torch
 torchvision
+XlsxWriter
