@@ -2,31 +2,34 @@ import streamlit as st
 from PIL import Image
 import pandas as pd
 import numpy as np
-import easyocr
+from paddleocr import PaddleOCR
 import re
 import io
 import cv2
+import os
 
 # --- SAYFA AYARLARI ---
-st.set_page_config(page_title="Z Raporu AI (V80 - Satır Birleştirici)", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="Z Raporu AI (V90 - PaddleOCR)", page_icon="🏎️", layout="wide")
 
-# --- YAPAY ZEKA MOTORU ---
+# --- PADDLE OCR MOTORU (ÖNBELLEK) ---
 @st.cache_resource
-def load_model():
-    return easyocr.Reader(['tr', 'en'], gpu=False)
+def load_paddle():
+    # use_angle_cls=True: Yamuk fişleri düzeltir
+    # lang='tr': Türkçe desteği
+    ocr = PaddleOCR(use_angle_cls=True, lang='tr', show_log=False)
+    return ocr
 
 try:
-    reader = load_model()
+    reader = load_paddle()
 except Exception as e:
-    st.error("Model Yüklenemedi.")
+    st.error(f"PaddleOCR Yüklenemedi: {e}")
     st.stop()
 
 # --- GÖRÜNTÜ İŞLEME ---
 def resmi_hazirla(pil_image):
     image = np.array(pil_image)
+    # PaddleOCR renkli de çalışır ama gri kontrastı artırır
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    # Gürültü temizliği
-    gray = cv2.medianBlur(gray, 3)
     return gray
 
 # --- SAYI TEMİZLEME ---
@@ -34,90 +37,96 @@ def sayi_temizle(text):
     if not text: return 0.0
     try:
         t = str(text).upper()
-        # Harf düzeltmeleri
+        # OCR Hata Düzeltmeleri
         t = t.replace('O', '0').replace('S', '5').replace('I', '1').replace('L', '1').replace('Z', '2').replace('B', '8')
+        
+        # 3/0 Yaması
         if "3/0" in t: t = t.replace("3/0", "370")
         
-        # KRİTİK: Boşlukları sil (2 . 144 -> 2.144 olsun diye)
         t = t.replace(' ', '').replace('*', '').replace('TL', '')
         t = re.sub(r'[^\d,.]', '', t)
         
         if len(t) > 0:
-            # 1.500,00 -> 1500.00 formatı
             t = t.replace('.', 'X').replace(',', '.').replace('X', '')
             return float(t)
     except:
         pass
     return 0.0
 
-# --- 🧬 SATIR BİRLEŞTİRİCİ (CORE TECHNOLOGY) 🧬 ---
-def grupla_ve_satir_yap(ocr_results, y_tolerans=15):
+# --- SATIR BİRLEŞTİRİCİ (PADDLE FORMATINA GÖRE) ---
+def paddle_sonuclari_duzenle(results):
     """
-    EasyOCR'ın dağınık kutularını (Bounding Box) Y eksenine göre gruplar.
-    Aynı hizadaki kelimeleri birleştirip cümle yapar.
+    Paddle çıktısı: [[[[x,y]..], (text, conf)], ...]
+    Bunu bizim işleyebileceğimiz basit listeye çevirir.
     """
-    # Y koordinatına (Top) göre sırala
-    # bbox = [[x1, y1], [x2, y2], [x3, y3], [x4, y4]] -> y1'e göre
-    sorted_results = sorted(ocr_results, key=lambda x: x[0][0][1])
+    if not results or results[0] is None: return []
     
+    # Sonuçları Y koordinatına göre sırala (Yukarıdan aşağıya)
+    sorted_res = sorted(results[0], key=lambda x: x[0][0][1])
+    
+    # Metinleri satır satır birleştir
     satirlar = []
-    if not sorted_results: return satirlar
+    if not sorted_res: return satirlar
 
-    mevcut_satir = [sorted_results[0]]
-    # Mevcut satırın ortalama Y yüksekliği
-    mevcut_y = (sorted_results[0][0][0][1] + sorted_results[0][0][2][1]) / 2
+    mevcut_satir = [sorted_res[0]]
+    mevcut_y = sorted_res[0][0][0][1] # İlk kutunun Y'si
 
-    for i in range(1, len(sorted_results)):
-        box, text, conf = sorted_results[i]
-        y_orta = (box[0][1] + box[2][1]) / 2
-
-        # Eğer yükseklik farkı azsa (aynı satırdalarsa)
-        if abs(y_orta - mevcut_y) < y_tolerans:
-            mevcut_satir.append(sorted_results[i])
+    for i in range(1, len(sorted_res)):
+        box = sorted_res[i][0]
+        y = box[0][1]
+        
+        # Aynı satırdaysa (15 piksel tolerans)
+        if abs(y - mevcut_y) < 15:
+            mevcut_satir.append(sorted_res[i])
         else:
-            # Satır bitti, kaydet
-            # X koordinatına göre (soldan sağa) sırala
+            # Satırı kaydet (X'e göre sırala: Soldan sağa)
             mevcut_satir.sort(key=lambda x: x[0][0][0])
-            # Metinleri birleştir
-            satir_metni = " ".join([item[1] for item in mevcut_satir])
-            satirlar.append(satir_metni)
+            text_line = " ".join([item[1][0] for item in mevcut_satir])
+            satirlar.append(text_line)
             
-            # Yeni satıra başla
-            mevcut_satir = [sorted_results[i]]
-            mevcut_y = y_orta
+            # Yeni satır
+            mevcut_satir = [sorted_res[i]]
+            mevcut_y = y
             
-    # Son satırı ekle
+    # Son kalanı ekle
     if mevcut_satir:
         mevcut_satir.sort(key=lambda x: x[0][0][0])
-        satirlar.append(" ".join([item[1] for item in mevcut_satir]))
+        satirlar.append(" ".join([item[1][0] for item in mevcut_satir]))
         
     return satirlar
 
-# --- PARA ARAMA (SATIR BAZLI) ---
-def satir_bazli_para_bul(satirlar, baslangic_index):
-    limit = min(baslangic_index + 4, len(satirlar)) # Altındaki 3 satıra bak
-    en_iyi_para = 0.0
+# --- MATEMATİK MOTORU ---
+def en_iyi_kombinasyonu_bul(adaylar):
+    nakit_list = sorted(list(set(adaylar.get('nakit', []) + [0.0])), reverse=True)
+    kredi_list = sorted(list(set(adaylar.get('kredi', []) + [0.0])), reverse=True)
+    toplam_list = sorted(list(set(adaylar.get('toplam', []))), reverse=True)
     
-    for i in range(baslangic_index, limit):
-        s = satirlar[i]
-        if "NO" in s or "ADET" in s: continue # Adet satırını atla (Opsiyonel)
+    en_iyi_set = {'Nakit': 0.0, 'Kredi': 0.0, 'Toplam': 0.0, 'Score': 0}
+
+    # 1. Matematiksel Doğrulama (Nakit + Kredi = Toplam)
+    for n in nakit_list:
+        for k in kredi_list:
+            hesaplanan = n + k
+            for t in toplam_list:
+                if t > 0 and abs(hesaplanan - t) < 1.5:
+                    return {'Nakit': n, 'Kredi': k, 'Toplam': t, 'Score': 100}
+    
+    # 2. Yedek Plan (Toplam Bulunamadıysa)
+    if en_iyi_set['Score'] == 0:
+        max_n = nakit_list[0] if nakit_list else 0.0
+        max_k = kredi_list[0] if kredi_list else 0.0
         
-        # Satırdaki tüm sayıları bul
-        # 2.144,00 gibi sayıları yakalamak için regex
-        adaylar = re.findall(r'[\d\.,\s]+', s) 
+        # Toplam listesinden kümülatif olmayan en büyüğü al
+        valid_totals = [t for t in toplam_list if t < 500000]
+        max_t = max(valid_totals) if valid_totals else (max_n + max_k)
         
-        for aday in adaylar:
-            deger = sayi_temizle(aday)
-            
-            # Adet filtresi (50'den küçük tam sayılar - 5, 12, 37)
-            if deger < 50 and float(deger).is_integer():
-                # İstisna: Yanında * varsa al
-                if "*" not in s: continue
-            
-            if deger > 0 and deger < 1000000:
-                if deger > en_iyi_para: en_iyi_para = deger
-                
-    return en_iyi_para
+        # Eğer hesaplanan toplam, bulunan max toplama yakınsa
+        if abs((max_n + max_k) - max_t) < 2.0:
+             return {'Nakit': max_n, 'Kredi': max_k, 'Toplam': max_t, 'Score': 90}
+             
+        return {'Nakit': max_n, 'Kredi': max_k, 'Toplam': max_t, 'Score': 50}
+
+    return en_iyi_set
 
 # --- ANALİZ MOTORU ---
 def veri_analiz(satirlar):
@@ -126,69 +135,93 @@ def veri_analiz(satirlar):
         'KDV': 0.0, 'Matrah_0': 0.0, 'Matrah_1': 0.0, 'Matrah_10': 0.0, 'Matrah_20': 0.0
     }
     
-    # 1. TARİH VE Z NO
     full_text = " ".join(satirlar).upper()
+    
+    # Tarih
     tarih = re.search(r'\d{2}[./-]\d{2}[./-]\d{4}', full_text)
     if tarih: veriler['Tarih'] = tarih.group(0).replace('-', '.').replace('/', '.')
     
-    zno = re.search(r'(?:Z\s*NO|SAYAÇ|RAPOR\s*NO)\D{0,5}(\d+)', full_text)
+    # Z No
+    zno = re.search(r'(?:Z\s*NO|SAYAÇ|RAPOR\s*NO|FİŞ\s*NO)\D{0,5}(\d+)', full_text)
     if zno: veriler['Z_No'] = zno.group(1)
 
-    # 2. DETAYLI ARAMA
+    # --- ADAY HAVUZU ---
+    aday_havuzu = {'nakit': [], 'kredi': [], 'toplam': []}
+    
     for i, s in enumerate(satirlar):
         s_upper = s.upper()
         
-        # Kümülatif Engeli
+        # Kümülatifleri Atla
         if "KUM" in s_upper or "KÜM" in s_upper or "YEKÜN" in s_upper: continue
-
-        # NAKİT
+        
+        # Satırdaki sayıları bul
+        adaylar = re.findall(r'[\d\.,]+', s_upper)
+        
+        # 1. NAKİT
         if "NAKİT" in s_upper or "NAKIT" in s_upper:
-            tutar = satir_bazli_para_bul(satirlar, i)
-            if tutar > veriler['Nakit']: veriler['Nakit'] = tutar
+            for aday in adaylar:
+                val = sayi_temizle(aday)
+                if val > 0 and not (val < 50 and float(val).is_integer()):
+                    aday_havuzu['nakit'].append(val)
+            # Alt satıra da bak
+            if i+1 < len(satirlar):
+                sub_adaylar = re.findall(r'[\d\.,]+', satirlar[i+1])
+                for aday in sub_adaylar:
+                    val = sayi_temizle(aday)
+                    if val > 0 and not (val < 50 and float(val).is_integer()):
+                        aday_havuzu['nakit'].append(val)
 
-        # KREDİ
+        # 2. KREDİ
         if ("KREDİ" in s_upper or "KART" in s_upper) and "YEMEK" not in s_upper:
-            tutar = satir_bazli_para_bul(satirlar, i)
-            if tutar > veriler['Kredi']: veriler['Kredi'] = tutar
+            for aday in adaylar:
+                val = sayi_temizle(aday)
+                if val > 0 and not (val < 50 and float(val).is_integer()):
+                    aday_havuzu['kredi'].append(val)
+            # Alt satıra da bak
+            if i+1 < len(satirlar):
+                sub_adaylar = re.findall(r'[\d\.,]+', satirlar[i+1])
+                for aday in sub_adaylar:
+                    val = sayi_temizle(aday)
+                    if val > 0 and not (val < 50 and float(val).is_integer()):
+                        aday_havuzu['kredi'].append(val)
 
-        # TOPLAM
+        # 3. TOPLAM
         if ("TOPLAM" in s_upper or "GENEL" in s_upper) and not any(x in s_upper for x in ["KDV", "%", "VERGİ"]):
-            tutar = satir_bazli_para_bul(satirlar, i)
-            if tutar > veriler['Toplam']: veriler['Toplam'] = tutar
+            for aday in adaylar:
+                val = sayi_temizle(aday)
+                if val > 0 and val < 500000: # Kümülatif filtresi
+                    aday_havuzu['toplam'].append(val)
 
-        # MATRAH / KDV
-        if "%" in s_upper or "TOPLAM" in s_upper or "MATRAH" in s_upper or "KDV" in s_upper:
-            tutar = satir_bazli_para_bul(satirlar, i)
-            if tutar == 0: continue
+        # 4. MATRAH/KDV (Direkt Al)
+        if "%" in s_upper or "TOPLAM" in s_upper or "KDV" in s_upper:
+            val = 0.0
+            for aday in adaylar:
+                v = sayi_temizle(aday)
+                if v > 0 and v < 500000: val = v
             
-            oran = -1
-            if "20" in s_upper: oran = 20
-            elif "10" in s_upper: oran = 10
-            elif " 1 " in s_upper or "%1" in s_upper: oran = 1
-            elif " 0 " in s_upper or "%0" in s_upper: oran = 0
-            
-            if oran != -1:
-                if "KDV" in s_upper: veriler['KDV'] += tutar
+            if val > 0:
+                if "KDV" in s_upper: veriler['KDV'] = max(veriler['KDV'], val)
                 elif "TOPLAM" in s_upper or "MATRAH" in s_upper:
-                    # Matrah toplamdan büyük olamaz
-                    if veriler['Toplam'] == 0 or tutar < veriler['Toplam']:
-                        if oran == 0: veriler['Matrah_0'] = max(veriler['Matrah_0'], tutar)
-                        elif oran == 1: veriler['Matrah_1'] = max(veriler['Matrah_1'], tutar)
-                        elif oran == 10: veriler['Matrah_10'] = max(veriler['Matrah_10'], tutar)
-                        elif oran == 20: veriler['Matrah_20'] = max(veriler['Matrah_20'], tutar)
+                    if "20" in s_upper: veriler['Matrah_20'] = max(veriler['Matrah_20'], val)
+                    elif "10" in s_upper: veriler['Matrah_10'] = max(veriler['Matrah_10'], val)
+                    elif " 1 " in s_upper: veriler['Matrah_1'] = max(veriler['Matrah_1'], val)
+                    elif " 0 " in s_upper: veriler['Matrah_0'] = max(veriler['Matrah_0'], val)
 
-    # 3. SAĞLAMA
-    hesaplanan = veriler['Nakit'] + veriler['Kredi']
-    if veriler['Toplam'] == 0 and hesaplanan > 0:
-        veriler['Toplam'] = hesaplanan
-    elif hesaplanan > veriler['Toplam']:
-        veriler['Toplam'] = hesaplanan
+    # --- KARAR ANI ---
+    sonuc = en_iyi_kombinasyonu_bul(aday_havuzu)
+    veriler['Nakit'] = sonuc['Nakit']
+    veriler['Kredi'] = sonuc['Kredi']
+    veriler['Toplam'] = sonuc['Toplam']
+    
+    if veriler['KDV'] > veriler['Toplam']: veriler['KDV'] = 0.0
 
     return veriler
 
 # --- ARAYÜZ ---
-st.title("🧬 Z Raporu AI - V80 (Satır Birleştirici)")
+st.title("🏎️ Z Raporu AI - V90 (PaddleOCR)")
+st.info("Bu sürüm Baidu'nun geliştirdiği en gelişmiş OCR motoru olan PaddleOCR'ı kullanır.")
 
+# Sekmeler
 tab1, tab2 = st.tabs(["📁 Dosya Yükle", "📷 Kamera"])
 resimler = []
 
@@ -211,14 +244,14 @@ if resimler:
                 img = Image.open(img_file)
                 img_np = resmi_hazirla(img)
                 
-                # AI OKUMASI (Koordinatlı - detail=1)
-                ocr_results = reader.readtext(img_np, detail=1)
+                # PADDLE OKUMASI
+                result = reader.ocr(img_np, cls=True)
                 
-                # SİHİR BURADA: Dağınık parçaları SATIR haline getir
-                satirlar = grupla_ve_satir_yap(ocr_results)
+                # Satırları Birleştir
+                satirlar = paddle_sonuclari_duzenle(result)
                 
-                # HATA AYIKLAMA: Ne okuduğunu görmek istersen aç
-                with st.expander(f"🔍 Kara Kutu: {name}"):
+                # Kara Kutu (Hata Ayıklama İçin)
+                with st.expander(f"🔍 AI Gözü: {name}"):
                     st.code("\n".join(satirlar))
                 
                 veri = veri_analiz(satirlar)
@@ -239,10 +272,9 @@ if resimler:
             cols = ["Durum", "Tarih", "Z_No", "Toplam", "Nakit", "Kredi", "KDV", "Matrah_0", "Matrah_1", "Matrah_10", "Matrah_20", "Dosya"]
             mevcut = [c for c in cols if c in df.columns]
             
-            st.info("Tablodaki verilere çift tıklayıp düzeltebilirsiniz.")
-            edited_df = st.data_editor(df[mevcut], num_rows="dynamic", use_container_width=True)
+            st.dataframe(df[mevcut], use_container_width=True)
             
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                edited_df.to_excel(writer, index=False)
+                df[mevcut].to_excel(writer, index=False)
             st.download_button("📥 Excel İndir", buffer.getvalue(), "Z_Raporu_AI.xlsx")
