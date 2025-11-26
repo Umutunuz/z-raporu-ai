@@ -8,7 +8,7 @@ import io
 import cv2
 
 # --- SAYFA AYARLARI ---
-st.set_page_config(page_title="Z Raporu AI (V78 - Akıl Süzgeci)", page_icon="🧠", layout="wide")
+st.set_page_config(page_title="Z Raporu AI (V79 - Keskin Nişancı)", page_icon="🎯", layout="wide")
 
 # --- YAPAY ZEKA MOTORU ---
 @st.cache_resource
@@ -25,9 +25,8 @@ except Exception as e:
 def resmi_hazirla(pil_image):
     image = np.array(pil_image)
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    gray = cv2.medianBlur(gray, 3)
-    # Kontrastı artır
-    gray = cv2.equalizeHist(gray)
+    # Biraz daha keskinleştirme
+    gray = cv2.convertScaleAbs(gray, alpha=1.5, beta=0) 
     return gray
 
 # --- SAYI TEMİZLEME ---
@@ -35,8 +34,8 @@ def sayi_temizle(text):
     if not text: return 0.0
     try:
         t = str(text).upper()
+        # Harf hataları
         t = t.replace('O', '0').replace('S', '5').replace('I', '1').replace('L', '1').replace('Z', '2').replace('B', '8')
-        
         # 3/0 Yaması
         if "3/0" in t: t = t.replace("3/0", "370")
         
@@ -49,27 +48,6 @@ def sayi_temizle(text):
     except:
         pass
     return 0.0
-
-# --- AKIL SÜZGECİ (HATA ENGELLEYİCİ) ---
-def mantik_kontrolu(veriler):
-    """
-    Mantıksız sayıları (Kümülatif vb.) temizler.
-    """
-    # 1. KDV KONTROLÜ: KDV, Toplamdan büyük olamaz!
-    if veriler['KDV'] > veriler['Toplam']:
-        veriler['KDV'] = 0.0 # Kümülatif çekmiş, sil.
-
-    # 2. MATRAH KONTROLÜ: Matrah, Toplamdan büyük olamaz.
-    for m in ['Matrah_0', 'Matrah_1', 'Matrah_10', 'Matrah_20']:
-        if veriler[m] > veriler['Toplam']:
-            veriler[m] = 0.0
-
-    # 3. TOPLAM KONTROLÜ: Eğer Toplam 0 ise, Parçaları Topla
-    hesaplanan = veriler['Nakit'] + veriler['Kredi']
-    if veriler['Toplam'] == 0 and hesaplanan > 0:
-        veriler['Toplam'] = hesaplanan
-        
-    return veriler
 
 # --- ANALİZ MOTORU ---
 def veri_analiz(text_list):
@@ -86,37 +64,30 @@ def veri_analiz(text_list):
     
     # 2. Z NO
     zno_match = re.search(r'(?:Z\s*NO|Z\s*SAYAÇ|RAPOR\s*NO)\D{0,5}(\d+)', full_text)
-    if zno_match:
-        veriler['Z_No'] = zno_match.group(1)
+    if zno_match: veriler['Z_No'] = zno_match.group(1)
     
-    # 3. SATIR BAZLI ARAMA
-    
-    # Önce tüm mantıklı sayıları bul (Genel Toplam Adayları)
-    tum_sayilar = []
-    for t in text_list:
-        val = sayi_temizle(t)
-        # 500.000'den küçük (Kümülatif olmayan) sayıları al
-        if val > 0 and val < 500000: tum_sayilar.append(val)
-        
-    if tum_sayilar:
-        veriler['Toplam'] = max(tum_sayilar)
+    # YASAKLI KELİMELER LİSTESİ (Vergi No, Mersis No vb.)
+    yasakli_kelimeler = ["VN", "VKN", "TCKN", "MERSIS", "SICIL", "TEL", "FAX", "KUM", "KÜM", "YEKÜN"]
+    yasakli_indexler = []
 
-    # Detaylı Arama
     for i, text in enumerate(text_list):
         t = text.upper()
-        
-        # Kümülatif Engeli
-        if "KUM" in t or "KÜM" in t or "YEKÜN" in t: continue
+        if any(y in t for y in yasakli_kelimeler):
+            yasakli_indexler.extend([i, i+1]) # Kendisi ve yanındakini yasakla
 
+    # 3. DETAYLI ARAMA
+    for i, text in enumerate(text_list):
+        if i in yasakli_indexler: continue
+        t = text.upper()
+        
         # NAKİT
         if "NAKİT" in t or "NAKIT" in t:
             for j in range(1, 5):
                 if i+j < len(text_list):
                     val = sayi_temizle(text_list[i+j])
                     if val > 0 and val < 500000:
-                        # Adet filtresi
-                        if val < 50 and float(val).is_integer(): continue
-                        if val <= veriler['Toplam']: veriler['Nakit'] = max(veriler['Nakit'], val)
+                        if val < 50 and val.is_integer(): continue # Adet filtresi
+                        veriler['Nakit'] = max(veriler['Nakit'], val)
 
         # KREDİ
         if ("KREDİ" in t or "KART" in t) and "YEMEK" not in t:
@@ -124,12 +95,11 @@ def veri_analiz(text_list):
                 if i+j < len(text_list):
                     val = sayi_temizle(text_list[i+j])
                     if val > 0 and val < 500000:
-                        if val < 50 and float(val).is_integer(): continue
-                        if val <= veriler['Toplam']: veriler['Kredi'] = max(veriler['Kredi'], val)
+                        if val < 50 and val.is_integer(): continue
+                        veriler['Kredi'] = max(veriler['Kredi'], val)
 
-        # KDV / MATRAH
+        # MATRAH / KDV
         if "%" in t or "TOPLAM" in t or "KDV" in t:
-            # Yanındaki sayıyı bul
             val = 0.0
             for j in range(1, 4):
                 if i+j < len(text_list):
@@ -140,20 +110,36 @@ def veri_analiz(text_list):
             
             if val > 0:
                 if "KDV" in t: 
-                    if val < veriler['Toplam']: veriler['KDV'] += val
+                    if val < 50000: veriler['KDV'] += val # Aşırı büyük KDV olmaz
                 elif "TOPLAM" in t or "MATRAH" in t:
                     if "20" in t: veriler['Matrah_20'] = max(veriler['Matrah_20'], val)
                     elif "10" in t: veriler['Matrah_10'] = max(veriler['Matrah_10'], val)
                     elif " 1 " in t: veriler['Matrah_1'] = max(veriler['Matrah_1'], val)
                     elif " 0 " in t: veriler['Matrah_0'] = max(veriler['Matrah_0'], val)
 
-    # --- FİNAL KONTROL ---
-    veriler = mantik_kontrolu(veriler)
+    # 4. FİNAL HESAPLAMA (EN GÜVENLİ YÖNTEM)
+    # Önce Nakit + Kredi toplamına bak.
+    hesaplanan = veriler['Nakit'] + veriler['Kredi']
     
+    if hesaplanan > 0:
+        veriler['Toplam'] = hesaplanan
+    else:
+        # Eğer hesaplayamadıysak OCR'daki "TOPLAM" satırına bak (Yedek)
+        # Ama asla rastgele en büyük sayıyı alma!
+        ocr_toplam = 0.0
+        for i, t in enumerate(text_list):
+            if "TOPLAM" in t.upper() and not any(x in t.upper() for x in ["KDV", "%", "KUM"]):
+                for j in range(1, 4):
+                    if i+j < len(text_list):
+                        v = sayi_temizle(text_list[i+j])
+                        if v > ocr_toplam and v < 500000: ocr_toplam = v
+        
+        if ocr_toplam > 0: veriler['Toplam'] = ocr_toplam
+
     return veriler
 
 # --- ARAYÜZ ---
-st.title("🧠 Z Raporu AI - V78 (Kontrollü)")
+st.title("🎯 Z Raporu AI - V79 (Keskin Nişancı)")
 
 # Sekmeler
 tab1, tab2 = st.tabs(["📁 Dosya Yükle", "📷 Kamera"])
@@ -199,8 +185,7 @@ if resimler:
             cols = ["Durum", "Tarih", "Z_No", "Toplam", "Nakit", "Kredi", "KDV", "Matrah_0", "Matrah_1", "Matrah_10", "Matrah_20", "Dosya"]
             mevcut = [c for c in cols if c in df.columns]
             
-            # EDİTÖRÜ AKTİF ET (Kullanıcı elle düzeltebilsin)
-            st.info("Tablo üzerindeki verilere çift tıklayarak düzeltebilirsiniz.")
+            # EDİTÖR
             edited_df = st.data_editor(df[mevcut], num_rows="dynamic", use_container_width=True)
             
             buffer = io.BytesIO()
