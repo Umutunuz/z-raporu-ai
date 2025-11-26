@@ -8,7 +8,7 @@ import io
 import cv2
 
 # --- SAYFA AYARLARI ---
-st.set_page_config(page_title="Z Raporu AI (V77 - Geometrik)", page_icon="📐", layout="wide")
+st.set_page_config(page_title="Z Raporu AI (V78 - Akıl Süzgeci)", page_icon="🧠", layout="wide")
 
 # --- YAPAY ZEKA MOTORU ---
 @st.cache_resource
@@ -25,8 +25,9 @@ except Exception as e:
 def resmi_hazirla(pil_image):
     image = np.array(pil_image)
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    # Gürültü temizliği
     gray = cv2.medianBlur(gray, 3)
+    # Kontrastı artır
+    gray = cv2.equalizeHist(gray)
     return gray
 
 # --- SAYI TEMİZLEME ---
@@ -34,8 +35,8 @@ def sayi_temizle(text):
     if not text: return 0.0
     try:
         t = str(text).upper()
-        # Harf Düzeltmeleri
         t = t.replace('O', '0').replace('S', '5').replace('I', '1').replace('L', '1').replace('Z', '2').replace('B', '8')
+        
         # 3/0 Yaması
         if "3/0" in t: t = t.replace("3/0", "370")
         
@@ -49,130 +50,160 @@ def sayi_temizle(text):
         pass
     return 0.0
 
-# --- KOORDİNAT EŞLEŞTİRİCİ (EN ÖNEMLİ KISIM) ---
-def deger_bul_koordinatli(hedef_kelimeler, tum_veriler, yasakli_kelimeler=[]):
+# --- AKIL SÜZGECİ (HATA ENGELLEYİCİ) ---
+def mantik_kontrolu(veriler):
     """
-    Hedef kelimeyi bulur (Örn: NAKİT).
-    Onunla AYNI YÜKSEKLİKTE (Y Ekseni) ve SAĞINDA (X Ekseni) olan sayıyı alır.
+    Mantıksız sayıları (Kümülatif vb.) temizler.
     """
-    bulunan_deger = 0.0
-    en_iyi_y_farki = 1000 # En yakın satırı bulmak için
-    
-    # 1. Hedef Kelimenin Konumunu Bul
-    hedef_box = None
-    for bbox, text, conf in tum_veriler:
-        t_upper = text.upper()
-        if any(k in t_upper for k in hedef_kelimeler) and not any(y in t_upper for y in yasakli_kelimeler):
-            hedef_box = bbox
-            break # İlk bulduğunu al (Genelde en üstteki doğrudur)
-            
-    if not hedef_box: return 0.0
+    # 1. KDV KONTROLÜ: KDV, Toplamdan büyük olamaz!
+    if veriler['KDV'] > veriler['Toplam']:
+        veriler['KDV'] = 0.0 # Kümülatif çekmiş, sil.
 
-    # Hedefin Y (Dikey) Merkezi
-    hedef_y = (hedef_box[0][1] + hedef_box[2][1]) / 2
-    hedef_x = hedef_box[2][0] # Hedefin sağ ucu
+    # 2. MATRAH KONTROLÜ: Matrah, Toplamdan büyük olamaz.
+    for m in ['Matrah_0', 'Matrah_1', 'Matrah_10', 'Matrah_20']:
+        if veriler[m] > veriler['Toplam']:
+            veriler[m] = 0.0
 
-    # 2. Aynı Hizadaki Sayıyı Ara
-    for bbox, text, conf in tum_veriler:
-        # Kendisi değilse
-        if bbox == hedef_box: continue
+    # 3. TOPLAM KONTROLÜ: Eğer Toplam 0 ise, Parçaları Topla
+    hesaplanan = veriler['Nakit'] + veriler['Kredi']
+    if veriler['Toplam'] == 0 and hesaplanan > 0:
+        veriler['Toplam'] = hesaplanan
         
-        # Sayı mı?
-        val = sayi_temizle(text)
-        if val <= 0: continue
-        
-        # Adet Filtresi (50'den küçük tam sayıları alma - Matrah oranları hariç)
-        if val < 50 and float(val).is_integer() and "MATRAH" not in str(hedef_kelimeler): 
-            continue
-
-        # Konum Kontrolü
-        sayi_y = (bbox[0][1] + bbox[2][1]) / 2
-        sayi_x = bbox[0][0] # Sayının sol ucu
-        
-        # Aynı satırda mı? (Y farkı az olmalı)
-        y_farki = abs(hedef_y - sayi_y)
-        
-        # Sayı, yazının sağında mı?
-        if y_farki < 30 and sayi_x > hedef_x: # 30 piksel tolerans
-            # En yakın hizadakini seç
-            if y_farki < en_iyi_y_farki:
-                en_iyi_y_farki = y_farki
-                bulunan_deger = val
-
-    return bulunan_deger
+    return veriler
 
 # --- ANALİZ MOTORU ---
-def veri_analiz(ocr_results):
+def veri_analiz(text_list):
     veriler = {
         'Tarih': "", 'Z_No': "", 'Toplam': 0.0, 'Nakit': 0.0, 'Kredi': 0.0, 
         'KDV': 0.0, 'Matrah_0': 0.0, 'Matrah_1': 0.0, 'Matrah_10': 0.0, 'Matrah_20': 0.0
     }
     
-    # Düz Metin Listesi (Tarih ve Z No için)
-    text_list = [item[1] for item in ocr_results]
     full_text = " ".join(text_list).upper()
     
-    # 1. TARİH (Gelişmiş Regex - Boşlukları Yutar)
-    # Örn: 16 . 10 . 2025 veya 16/10/2025
-    tarih = re.search(r'(\d{2})\s*[./-]\s*(\d{2})\s*[./-]\s*(\d{4})', full_text)
-    if tarih: 
-        veriler['Tarih'] = f"{tarih.group(1)}.{tarih.group(2)}.{tarih.group(3)}"
+    # 1. TARİH
+    tarih = re.search(r'\d{2}[./-]\d{2}[./-]\d{4}', full_text)
+    if tarih: veriler['Tarih'] = tarih.group(0).replace('-', '.').replace('/', '.')
     
-    # 2. Z NO (Sadece "Z NO" kelimesinin yanındakini alır)
-    # EKÜ, FİŞ NO gibi tuzaklara düşmez.
+    # 2. Z NO
     zno_match = re.search(r'(?:Z\s*NO|Z\s*SAYAÇ|RAPOR\s*NO)\D{0,5}(\d+)', full_text)
     if zno_match:
-        candidate = zno_match.group(1)
-        # 37 gibi küçük sayıları Z No sanmasın (Genelde Fiş Nosudur)
-        if int(candidate) > 0:
-            veriler['Z_No'] = candidate
-
-    # 3. TOPLAM TUTAR (İki Yöntem)
-    # Yöntem A: "TOPLAM" yazısının sağındaki sayı
-    tutar_geo = deger_bul_koordinatli(["TOPLAM", "GENEL"], ocr_results, ["KDV", "%", "VERGİ", "FİŞ", "KUM", "KÜM"])
+        veriler['Z_No'] = zno_match.group(1)
     
-    # Yöntem B: Sayfadaki en büyük sayı (Kümülatif hariç)
-    max_val = 0.0
-    for item in ocr_results:
-        t = item[1].upper()
-        if "KUM" in t or "KÜM" in t: continue
-        v = sayi_temizle(t)
-        if v > max_val and v < 500000: max_val = v
+    # 3. SATIR BAZLI ARAMA
     
-    veriler['Toplam'] = max(tutar_geo, max_val)
+    # Önce tüm mantıklı sayıları bul (Genel Toplam Adayları)
+    tum_sayilar = []
+    for t in text_list:
+        val = sayi_temizle(t)
+        # 500.000'den küçük (Kümülatif olmayan) sayıları al
+        if val > 0 and val < 500000: tum_sayilar.append(val)
+        
+    if tum_sayilar:
+        veriler['Toplam'] = max(tum_sayilar)
 
-    # 4. NAKİT VE KREDİ (Geometrik Arama)
-    veriler['Nakit'] = deger_bul_koordinatli(["NAKİT", "NAKIT"], ocr_results)
-    veriler['Kredi'] = deger_bul_koordinatli(["KREDİ", "KART", "BANKA"], ocr_results, ["YEMEK"])
-
-    # 5. MATRAH VE KDV (Oran + Geometri)
-    # % işaretini bulup yanındakini alacağız
-    for bbox, text, conf in ocr_results:
+    # Detaylı Arama
+    for i, text in enumerate(text_list):
         t = text.upper()
+        
+        # Kümülatif Engeli
+        if "KUM" in t or "KÜM" in t or "YEKÜN" in t: continue
+
+        # NAKİT
+        if "NAKİT" in t or "NAKIT" in t:
+            for j in range(1, 5):
+                if i+j < len(text_list):
+                    val = sayi_temizle(text_list[i+j])
+                    if val > 0 and val < 500000:
+                        # Adet filtresi
+                        if val < 50 and float(val).is_integer(): continue
+                        if val <= veriler['Toplam']: veriler['Nakit'] = max(veriler['Nakit'], val)
+
+        # KREDİ
+        if ("KREDİ" in t or "KART" in t) and "YEMEK" not in t:
+            for j in range(1, 5):
+                if i+j < len(text_list):
+                    val = sayi_temizle(text_list[i+j])
+                    if val > 0 and val < 500000:
+                        if val < 50 and float(val).is_integer(): continue
+                        if val <= veriler['Toplam']: veriler['Kredi'] = max(veriler['Kredi'], val)
+
+        # KDV / MATRAH
         if "%" in t or "TOPLAM" in t or "KDV" in t:
-            # Oran tespiti
-            oran = -1
-            if "20" in t: oran = 20
-            elif "10" in t: oran = 10
-            elif " 1 " in t or "%1" in t: oran = 1
-            elif " 0 " in t or "%0" in t: oran = 0
+            # Yanındaki sayıyı bul
+            val = 0.0
+            for j in range(1, 4):
+                if i+j < len(text_list):
+                    v = sayi_temizle(text_list[i+j])
+                    if v > 0 and v < 500000:
+                        val = v
+                        break
             
-            # Eğer oran bulduysak, o satırdaki parayı bul
-            # Bu sefer kendi kutusunu hedef gösteriyoruz
-            val = deger_bul_koordinatli([t], ocr_results) # Kendi satırındaki diğer sayıyı bul
-            
-            if val > 0 and val < veriler['Toplam']: # Matrah toplamdan büyük olamaz
-                if "KDV" in t: veriler['KDV'] += val
+            if val > 0:
+                if "KDV" in t: 
+                    if val < veriler['Toplam']: veriler['KDV'] += val
                 elif "TOPLAM" in t or "MATRAH" in t:
-                    if oran == 0: veriler['Matrah_0'] = max(veriler['Matrah_0'], val)
-                    elif oran == 1: veriler['Matrah_1'] = max(veriler['Matrah_1'], val)
-                    elif oran == 10: veriler['Matrah_10'] = max(veriler['Matrah_10'], val)
-                    elif oran == 20: veriler['Matrah_20'] = max(veriler['Matrah_20'], val)
+                    if "20" in t: veriler['Matrah_20'] = max(veriler['Matrah_20'], val)
+                    elif "10" in t: veriler['Matrah_10'] = max(veriler['Matrah_10'], val)
+                    elif " 1 " in t: veriler['Matrah_1'] = max(veriler['Matrah_1'], val)
+                    elif " 0 " in t: veriler['Matrah_0'] = max(veriler['Matrah_0'], val)
 
-    # 6. MUHASEBE KONTROLÜ (Kümülatif Temizliği)
-    # Eğer KDV > Toplam ise, o KDV yanlıştır (Kümülatiftir), sıfırla.
-    if veriler['KDV'] > veriler['Toplam']: veriler['KDV'] = 0.0
+    # --- FİNAL KONTROL ---
+    veriler = mantik_kontrolu(veriler)
+    
+    return veriler
 
-    # Eğer Nakit + Kredi > 0 ise ve Toplam'dan farklıysa, Toplamı güncelle
-    toplam_odeme = veriler['Nakit'] + veriler['Kredi']
-    if toplam_odeme >
+# --- ARAYÜZ ---
+st.title("🧠 Z Raporu AI - V78 (Kontrollü)")
+
+# Sekmeler
+tab1, tab2 = st.tabs(["📁 Dosya Yükle", "📷 Kamera"])
+resimler = []
+
+with tab1:
+    uploaded_files = st.file_uploader("Galeriden Seç", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
+    if uploaded_files:
+        for f in uploaded_files: resimler.append((f, f.name))
+
+with tab2:
+    camera_pic = st.camera_input("Fotoğraf Çek")
+    if camera_pic: resimler.append((camera_pic, "Kamera_Gorseli.jpg"))
+
+if resimler:
+    if st.button("Analizi Başlat", type="primary"):
+        tum_veriler = []
+        bar = st.progress(0)
+        
+        for i, (img_file, name) in enumerate(resimler):
+            try:
+                img = Image.open(img_file)
+                img_np = resmi_hazirla(img)
+                
+                ocr_results = reader.readtext(img_np, detail=0)
+                veri = veri_analiz(ocr_results)
+                veri['Dosya'] = name
+                
+                # Durum İkonu
+                if veri['Toplam'] > 0: 
+                    veri['Durum'] = "✅"
+                else: 
+                    veri['Durum'] = "❌"
+                
+                tum_veriler.append(veri)
+            except Exception as e:
+                st.error(f"Hata: {name} - {e}")
+            
+            bar.progress((i+1)/len(resimler))
+            
+        df = pd.DataFrame(tum_veriler)
+        if not df.empty:
+            cols = ["Durum", "Tarih", "Z_No", "Toplam", "Nakit", "Kredi", "KDV", "Matrah_0", "Matrah_1", "Matrah_10", "Matrah_20", "Dosya"]
+            mevcut = [c for c in cols if c in df.columns]
+            
+            # EDİTÖRÜ AKTİF ET (Kullanıcı elle düzeltebilsin)
+            st.info("Tablo üzerindeki verilere çift tıklayarak düzeltebilirsiniz.")
+            edited_df = st.data_editor(df[mevcut], num_rows="dynamic", use_container_width=True)
+            
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                edited_df.to_excel(writer, index=False)
+            st.download_button("📥 Excel İndir", buffer.getvalue(), "Z_Raporu_AI.xlsx")
