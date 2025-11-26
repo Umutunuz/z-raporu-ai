@@ -9,14 +9,12 @@ import cv2
 import os
 
 # --- SAYFA AYARLARI ---
-st.set_page_config(page_title="Z Raporu AI (V92 - Final)", page_icon="🏎️", layout="wide")
+st.set_page_config(page_title="Z Raporu AI (V93 - Çelik Yelek)", page_icon="🛡️", layout="wide")
 
-# --- PADDLE OCR MOTORU (ÖNBELLEK) ---
+# --- PADDLE OCR MOTORU ---
 @st.cache_resource
 def load_paddle():
     # use_angle_cls=True: Yamuk fişleri düzeltir
-    # lang='tr': Türkçe desteği
-    # show_log=False parametresi kaldırıldı (Hata önlemi)
     return PaddleOCR(use_angle_cls=True, lang='tr')
 
 try:
@@ -28,8 +26,11 @@ except Exception as e:
 # --- GÖRÜNTÜ İŞLEME ---
 def resmi_hazirla(pil_image):
     image = np.array(pil_image)
-    # PaddleOCR renkli de çalışır ama gri kontrastı artırır
-    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    # Gri tonlama
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = image
     return gray
 
 # --- SAYI TEMİZLEME ---
@@ -37,10 +38,7 @@ def sayi_temizle(text):
     if not text: return 0.0
     try:
         t = str(text).upper()
-        # OCR Hata Düzeltmeleri
         t = t.replace('O', '0').replace('S', '5').replace('I', '1').replace('L', '1').replace('Z', '2').replace('B', '8')
-        
-        # 3/0 Yaması
         if "3/0" in t: t = t.replace("3/0", "370")
         
         t = t.replace(' ', '').replace('*', '').replace('TL', '')
@@ -53,16 +51,25 @@ def sayi_temizle(text):
         pass
     return 0.0
 
-# --- SATIR BİRLEŞTİRİCİ ---
+# --- SATIR BİRLEŞTİRİCİ (GÜVENLİK KALKANI EKLENDİ) ---
 def paddle_sonuclari_duzenle(results):
-    if not results or results[0] is None: return []
+    # --- GÜVENLİK KONTROLÜ BAŞLANGIÇ ---
+    if results is None: return []
+    if len(results) == 0: return []
+    if results[0] is None: return []
+    # ------------------------------------
     
-    # PaddleOCR sonuç yapısı: [[[[x1,y1]..], (text, conf)], ...]
-    sorted_res = sorted(results[0], key=lambda x: x[0][0][1])
+    # PaddleOCR formatı: [ [ [ [x,y]..], (text, conf)], ... ]
+    # results[0] listenin kendisidir.
+    ocr_data = results[0]
+    
+    # Eğer liste boşsa dön
+    if not ocr_data: return []
+
+    # Y'ye göre sırala
+    sorted_res = sorted(ocr_data, key=lambda x: x[0][0][1])
     
     satirlar = []
-    if not sorted_res: return satirlar
-
     mevcut_satir = [sorted_res[0]]
     mevcut_y = sorted_res[0][0][0][1]
 
@@ -70,7 +77,6 @@ def paddle_sonuclari_duzenle(results):
         box = sorted_res[i][0]
         y = box[0][1]
         
-        # 15 piksel tolerans ile aynı hizadakileri birleştir
         if abs(y - mevcut_y) < 15:
             mevcut_satir.append(sorted_res[i])
         else:
@@ -95,7 +101,6 @@ def en_iyi_kombinasyonu_bul(adaylar):
     
     en_iyi_set = {'Nakit': 0.0, 'Kredi': 0.0, 'Toplam': 0.0, 'Score': 0}
 
-    # 1. Tam Eşleşme
     for n in nakit_list:
         for k in kredi_list:
             hesaplanan = n + k
@@ -103,7 +108,6 @@ def en_iyi_kombinasyonu_bul(adaylar):
                 if t > 0 and abs(hesaplanan - t) < 1.5:
                     return {'Nakit': n, 'Kredi': k, 'Toplam': t, 'Score': 100}
     
-    # 2. Yedek Plan
     if en_iyi_set['Score'] == 0:
         max_n = nakit_list[0] if nakit_list else 0.0
         max_k = kredi_list[0] if kredi_list else 0.0
@@ -125,6 +129,8 @@ def veri_analiz(satirlar):
         'KDV': 0.0, 'Matrah_0': 0.0, 'Matrah_1': 0.0, 'Matrah_10': 0.0, 'Matrah_20': 0.0
     }
     
+    if not satirlar: return veriler
+
     full_text = " ".join(satirlar).upper()
     
     tarih = re.search(r'\d{2}[./-]\d{2}[./-]\d{4}', full_text)
@@ -141,13 +147,11 @@ def veri_analiz(satirlar):
         
         adaylar = re.findall(r'[\d\.,]+', s_upper)
         
-        # Nakit Arama
         if "NAKİT" in s_upper or "NAKIT" in s_upper:
             for aday in adaylar:
                 val = sayi_temizle(aday)
                 if val > 0 and not (val < 50 and float(val).is_integer()):
                     aday_havuzu['nakit'].append(val)
-            # Alt satıra bak
             if i+1 < len(satirlar):
                 sub_adaylar = re.findall(r'[\d\.,]+', satirlar[i+1])
                 for aday in sub_adaylar:
@@ -155,13 +159,11 @@ def veri_analiz(satirlar):
                     if val > 0 and not (val < 50 and float(val).is_integer()):
                         aday_havuzu['nakit'].append(val)
 
-        # Kredi Arama
         if ("KREDİ" in s_upper or "KART" in s_upper) and "YEMEK" not in s_upper:
             for aday in adaylar:
                 val = sayi_temizle(aday)
                 if val > 0 and not (val < 50 and float(val).is_integer()):
                     aday_havuzu['kredi'].append(val)
-            # Alt satıra bak
             if i+1 < len(satirlar):
                 sub_adaylar = re.findall(r'[\d\.,]+', satirlar[i+1])
                 for aday in sub_adaylar:
@@ -169,14 +171,12 @@ def veri_analiz(satirlar):
                     if val > 0 and not (val < 50 and float(val).is_integer()):
                         aday_havuzu['kredi'].append(val)
 
-        # Toplam Arama
         if ("TOPLAM" in s_upper or "GENEL" in s_upper) and not any(x in s_upper for x in ["KDV", "%", "VERGİ"]):
             for aday in adaylar:
                 val = sayi_temizle(aday)
                 if val > 0 and val < 500000:
                     aday_havuzu['toplam'].append(val)
 
-        # KDV ve Matrah (Direkt Al)
         if "%" in s_upper or "TOPLAM" in s_upper or "KDV" in s_upper:
             val = 0.0
             for aday in adaylar:
@@ -191,7 +191,6 @@ def veri_analiz(satirlar):
                     elif " 1 " in s_upper: veriler['Matrah_1'] = max(veriler['Matrah_1'], val)
                     elif " 0 " in s_upper: veriler['Matrah_0'] = max(veriler['Matrah_0'], val)
 
-    # Hesapla
     sonuc = en_iyi_kombinasyonu_bul(aday_havuzu)
     veriler['Nakit'] = sonuc['Nakit']
     veriler['Kredi'] = sonuc['Kredi']
@@ -202,7 +201,7 @@ def veri_analiz(satirlar):
     return veriler
 
 # --- ARAYÜZ ---
-st.title("🏎️ Z Raporu AI - V92 (Final)")
+st.title("🛡️ Z Raporu AI - V93 (Çökme Korumalı)")
 
 tab1, tab2 = st.tabs(["📁 Dosya Yükle", "📷 Kamera"])
 resimler = []
@@ -226,13 +225,10 @@ if resimler:
                 img = Image.open(img_file)
                 img_np = resmi_hazirla(img)
                 
-                # --- BURADA DEĞİŞİKLİK YAPILDI (cls=True kaldırıldı) ---
-                result = reader.ocr(img_np) 
-                # -------------------------------------------------------
-                
+                result = reader.ocr(img_np)
                 satirlar = paddle_sonuclari_duzenle(result)
                 
-                # Kara Kutu (İstersen açabilirsin)
+                # Kara Kutu (Hata ayıklamak istersen aç)
                 # with st.expander(f"🔍 AI Gözü: {name}"):
                 #    st.code("\n".join(satirlar))
                 
@@ -244,7 +240,8 @@ if resimler:
                 
                 tum_veriler.append(veri)
             except Exception as e:
-                st.error(f"Hata: {name} - {e}")
+                # Hata olsa bile devam et, sadece uyarı ver
+                st.warning(f"Bir dosya okunamadı: {name}. Sebep: {e}")
             
             bar.progress((i+1)/len(resimler))
             
