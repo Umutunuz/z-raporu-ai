@@ -4,4 +4,5 @@ numpy
 opencv-python-headless
 paddlepaddle
 paddleocr
+ultralytics
 XlsxWriter
