@@ -9,24 +9,29 @@ import io
 import os
 
 # --- SAYFA AYARLARI ---
-st.set_page_config(page_title="Z Raporu AI (V100 - Tam Otomatik)", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="Z Raporu AI (V101 - Final)", page_icon="🤖", layout="wide")
 
 # --- 1. MODELLERİ YÜKLE (ÖNBELLEK) ---
 @st.cache_resource
 def load_models():
     # A. Nesne Tanıma (Senin Eğittiğin Model)
     # best.pt dosyası GitHub'da app.py ile aynı klasörde olmalı
+    if not os.path.exists("best.pt"):
+        st.error("⚠️ 'best.pt' dosyası bulunamadı! Lütfen GitHub'a yüklediğinizden emin olun.")
+        st.stop()
+        
     detector = YOLO('best.pt')
     
     # B. Yazı Okuma (PaddleOCR)
-    reader = PaddleOCR(use_angle_cls=True, lang='tr', show_log=False)
+    # show_log parametresi kaldırıldı (Hata kaynağıydı)
+    reader = PaddleOCR(use_angle_cls=True, lang='tr')
     
     return detector, reader
 
 try:
     detector, reader = load_models()
 except Exception as e:
-    st.error(f"Modeller Yüklenemedi! 'best.pt' dosyasını yüklediğinizden emin olun. Hata: {e}")
+    st.error(f"Modeller Yüklenirken Hata Oluştu: {e}")
     st.stop()
 
 # --- SAYI TEMİZLEME ---
@@ -61,9 +66,11 @@ def analyze_image(image, filename):
         'KDV': 0.0, 'Matrah_0': 0.0, 'Matrah_1': 0.0, 'Matrah_10': 0.0, 'Matrah_20': 0.0
     }
     
-    # Sınıf Eşleştirmesi (Roboflow'da verdiğin isimlere göre)
-    # Sen Roboflow'da: z_no, tarih, toplam, nakit, kredi, kdv_1, kdv_10, kdv_20 tanımladın.
-    
+    # Herhangi bir nesne bulundu mu?
+    if not results or len(results[0].boxes) == 0:
+        st.warning(f"⚠️ {filename} dosyasında Z Raporu alanları tespit edilemedi. Fotoğraf net mi?")
+        return veriler, img_np
+
     for r in results:
         boxes = r.boxes
         for box in boxes:
@@ -77,8 +84,7 @@ def analyze_image(image, filename):
             # Koordinatlar
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             
-            # Resmi Kes (Crop)
-            # Güvenlik payı: Kutuyu biraz genişletelim ki yazılar kesilmesin
+            # Resmi Kes (Crop) ve Genişlet
             h, w, _ = img_np.shape
             y1 = max(0, y1 - 5)
             y2 = min(h, y2 + 5)
@@ -88,23 +94,21 @@ def analyze_image(image, filename):
             cropped_img = img_np[y1:y2, x1:x2]
             
             # 2. PADDLEOCR İLE OKU
-            ocr_result = reader.ocr(cropped_img, cls=True)
+            # cls=True parametresi kaldırıldı (Gerekirse eklenebilir ama bazen hata yapar)
+            ocr_result = reader.ocr(cropped_img, cls=False)
             
             text = ""
             if ocr_result and ocr_result[0]:
-                # Bulunan tüm yazıları birleştir
                 text = " ".join([line[1][0] for line in ocr_result[0]])
             
             # 3. VERİYİ KAYDET
             if cls_name == 'tarih':
                 veriler['Tarih'] = text
             elif cls_name == 'z_no':
-                # Sadece sayıları al
                 z_clean = re.sub(r'[^\d]', '', text)
                 veriler['Z_No'] = z_clean
             elif cls_name in ['toplam', 'nakit', 'kredi']:
                 val = sayi_temizle(text)
-                # Aynı sınıftan birden fazla kutu bulursa en büyüğünü al (Güvenlik)
                 if cls_name == 'toplam': veriler['Toplam'] = max(veriler['Toplam'], val)
                 elif cls_name == 'nakit': veriler['Nakit'] = max(veriler['Nakit'], val)
                 elif cls_name == 'kredi': veriler['Kredi'] = max(veriler['Kredi'], val)
@@ -116,6 +120,9 @@ def analyze_image(image, filename):
                 elif '20' in cls_name: veriler['Matrah_20'] = max(veriler['Matrah_20'], val)
                 elif '1' in cls_name: veriler['Matrah_1'] = max(veriler['Matrah_1'], val)
                 elif '0' in cls_name: veriler['Matrah_0'] = max(veriler['Matrah_0'], val)
+            
+            # Görselleştirme (Kutuları çiz)
+            cv2.rectangle(img_np, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
     # 4. SAĞLAMA (Eksik varsa tamamla)
     hesaplanan = veriler['Nakit'] + veriler['Kredi']
@@ -130,8 +137,8 @@ def analyze_image(image, filename):
     return veriler, img_np
 
 # --- ARAYÜZ ---
-st.title("🤖 Z Raporu AI - V100 (Özel Eğitimli)")
-st.info("Bu sürüm sizin eğittiğiniz Yapay Zeka modelini kullanır. Sadece işaretlediğiniz alanları okur.")
+st.title("🤖 Z Raporu AI - V101 (Özel Eğitimli)")
+st.info("Bu sürüm sizin eğittiğiniz Yapay Zeka modelini kullanır.")
 
 # Sekmeler
 tab1, tab2 = st.tabs(["📁 Dosya Yükle", "📷 Kamera"])
@@ -165,12 +172,9 @@ if resimler:
             
         df = pd.DataFrame(tum_veriler)
         if not df.empty:
-            # Sütun Düzeni
             cols = ["Durum", "Tarih", "Z_No", "Toplam", "Nakit", "Kredi", "KDV", "Matrah_0", "Matrah_1", "Matrah_10", "Matrah_20", "Dosya"]
-            # Veride olmayan sütunları hata vermemesi için kontrol et
             mevcut_cols = [c for c in cols if c in df.columns]
             
-            # EDİTÖR
             edited_df = st.data_editor(df[mevcut_cols], num_rows="dynamic", use_container_width=True)
             
             buffer = io.BytesIO()
