@@ -10,204 +10,222 @@ import cv2
 import os
 
 # --- SAYFA AYARLARI ---
-st.set_page_config(page_title="Z Raporu AI (V103 - Renk Uzmanı)", page_icon="🎨", layout="wide")
+st.set_page_config(page_title="Z Raporu AI (V105 - Stabil)", page_icon="🏢", layout="wide")
 
-# --- MODELLERİ YÜKLE ---
+# --- 1. MODELLERİ GÜVENLİ YÜKLE ---
 @st.cache_resource
 def load_models():
+    # YOLO Kontrolü
     if not os.path.exists("best.pt"):
-        st.error("⚠️ 'best.pt' dosyası bulunamadı! Lütfen GitHub'a yükleyin.")
-        st.stop()
+        return None, None
     
-    # YOLO'yu CPU modunda başlat (Sunucu dostu)
+    # YOLO'yu Yükle
     detector = YOLO('best.pt')
     
-    # PaddleOCR
-    reader = PaddleOCR(use_angle_cls=True, lang='tr')
+    # PaddleOCR'ı En Yalın Haliyle Yükle (Argüman hatası vermemesi için)
+    # use_angle_cls=True : Yamuk fişleri düzeltir.
+    # lang='tr' : Türkçe karakterleri tanır.
+    reader = PaddleOCR(use_angle_cls=True, lang='tr') 
+    
     return detector, reader
 
 try:
     detector, reader = load_models()
+    if detector is None:
+        st.error("⚠️ 'best.pt' dosyası bulunamadı! Lütfen GitHub'a yükleyin.")
+        st.stop()
 except Exception as e:
-    st.error(f"Hata: {e}")
+    st.error(f"Sistem Başlatma Hatası: {e}")
     st.stop()
 
-# --- SAYI TEMİZLEME ---
+# --- 2. GÖRÜNTÜ FORMATLAMA (CRASH ÖNLEYİCİ) ---
+def resmi_standartlastir(pil_image):
+    """
+    Görüntüyü ne olursa olsun Paddle ve YOLO'nun sevdiği
+    3 Kanallı (RGB) Numpy dizisine çevirir.
+    """
+    # PIL -> Numpy
+    img = np.array(pil_image)
+    
+    # Eğer resim Gri (2 boyutlu) ise -> RGB (3 boyutlu) yap
+    if len(img.shape) == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+    # Eğer resim zaten Renkli ama 4 kanallı (PNG) ise -> RGB yap
+    elif img.shape[2] == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
+        
+    return img
+
+# --- 3. SAYI TEMİZLEME MOTORU ---
 def sayi_temizle(text):
     if not text: return 0.0
     try:
         t = str(text).upper()
+        # OCR Karakter Hatalarını Düzelt
         t = t.replace('O', '0').replace('S', '5').replace('I', '1').replace('L', '1').replace('Z', '2').replace('B', '8')
+        
+        # Özel Yama: 3/0 -> 370
         if "3/0" in t: t = t.replace("3/0", "370")
+        
+        # Temizlik
         t = t.replace(' ', '').replace('*', '').replace('TL', '')
-        t = re.sub(r'[^\d,.]', '', t)
+        t = re.sub(r'[^\d,.]', '', t) # Rakam ve nokta/virgül dışındakileri at
+        
         if len(t) > 0:
+            # 1.500,00 -> 1500.00 formatı
             t = t.replace('.', 'X').replace(',', '.').replace('X', '')
-            return float(t)
+            val = float(t)
+            return val
     except:
         pass
     return 0.0
 
-# --- 1. YÖNTEM: KLASİK ANALİZ (YEDEK) ---
-def paddle_sonuclari_duzenle(results):
-    if not results or results[0] is None: return []
-    sorted_res = sorted(results[0], key=lambda x: x[0][0][1])
-    satirlar = []
-    if not sorted_res: return satirlar
-
-    mevcut_satir = [sorted_res[0]]
-    mevcut_y = sorted_res[0][0][0][1]
-
-    for i in range(1, len(sorted_res)):
-        box = sorted_res[i][0]
-        y = box[0][1]
-        if abs(y - mevcut_y) < 15:
-            mevcut_satir.append(sorted_res[i])
-        else:
-            mevcut_satir.sort(key=lambda x: x[0][0][0])
-            text_line = " ".join([item[1][0] for item in mevcut_satir])
-            satirlar.append(text_line)
-            mevcut_satir = [sorted_res[i]]
-            mevcut_y = y
-            
-    if mevcut_satir:
-        mevcut_satir.sort(key=lambda x: x[0][0][0])
-        satirlar.append(" ".join([item[1][0] for item in mevcut_satir]))
-    return satirlar
-
-def klasik_analiz(satirlar):
-    veriler = {'Tarih': "", 'Z_No': "", 'Toplam': 0.0, 'Nakit': 0.0, 'Kredi': 0.0, 'KDV': 0.0, 'Matrah_0': 0.0, 'Matrah_1': 0.0, 'Matrah_10': 0.0, 'Matrah_20': 0.0}
-    full_text = " ".join(satirlar).upper()
+# --- 4. ANALİZ VE EŞLEŞTİRME MOTORU ---
+def verileri_isle(ocr_results, dosya_adi):
+    veriler = {
+        'Dosya': dosya_adi,
+        'Tarih': "", 'Z_No': "", 'Toplam': 0.0, 'Nakit': 0.0, 'Kredi': 0.0, 
+        'KDV': 0.0, 'Matrah_0': 0.0, 'Matrah_1': 0.0, 'Matrah_10': 0.0, 'Matrah_20': 0.0
+    }
     
+    if not ocr_results: return veriler
+
+    # PaddleOCR çıktısı: [[[[x,y]..], ("text", conf)], ...]
+    # Biz sadece metinleri bir listeye alalım
+    text_list = [line[1][0] for line in ocr_results[0]]
+    full_text = " ".join(text_list).upper()
+    
+    # --- A. TARİH VE Z NO (REGEX) ---
     tarih = re.search(r'\d{2}[./-]\d{2}[./-]\d{4}', full_text)
     if tarih: veriler['Tarih'] = tarih.group(0).replace('-', '.').replace('/', '.')
     
     zno = re.search(r'(?:Z\s*NO|SAYAÇ|RAPOR\s*NO)\D{0,5}(\d+)', full_text)
     if zno: veriler['Z_No'] = zno.group(1)
 
-    for i, s in enumerate(satirlar):
-        s_upper = s.upper()
-        if "KUM" in s_upper or "KÜM" in s_upper: continue
-        adaylar = re.findall(r'[\d\.,]+', s_upper)
+    # --- B. PARA ANALİZİ (KOORDİNATLI) ---
+    # Metinlerin konumlarına göre işlem yapacağız
+    raw_data = ocr_results[0] # [bbox, (text, conf)]
+    
+    # Yüksekliğe göre sırala (Yukarıdan aşağıya okuma sırası)
+    raw_data = sorted(raw_data, key=lambda x: x[0][0][1])
+
+    for i, item in enumerate(raw_data):
+        bbox = item[0]
+        text = item[1][0].upper()
         
-        if "NAKİT" in s_upper or "NAKIT" in s_upper:
-            for a in adaylar:
-                v = sayi_temizle(a)
-                if v > 0 and v < 500000:
-                    if not (v < 50 and float(v).is_integer()): veriler['Nakit'] = max(veriler['Nakit'], v)
-            if i+1 < len(satirlar):
-                for a in re.findall(r'[\d\.,]+', satirlar[i+1]):
-                    v = sayi_temizle(a)
-                    if v > 0 and v < 500000 and not (v < 50 and float(v).is_integer()): veriler['Nakit'] = max(veriler['Nakit'], v)
+        # Kümülatif Filtresi (Kritik)
+        if "KUM" in text or "KÜM" in text or "YEKÜN" in text: continue
 
-        if ("KREDİ" in s_upper or "KART" in s_upper) and "YEMEK" not in s_upper:
-             for a in adaylar:
-                v = sayi_temizle(a)
-                if v > 0 and v < 500000 and not (v < 50 and float(v).is_integer()): veriler['Kredi'] = max(veriler['Kredi'], v)
-             if i+1 < len(satirlar):
-                for a in re.findall(r'[\d\.,]+', satirlar[i+1]):
-                    v = sayi_temizle(a)
-                    if v > 0 and v < 500000 and not (v < 50 and float(v).is_integer()): veriler['Kredi'] = max(veriler['Kredi'], v)
-
-        if "%" in s_upper or "TOPLAM" in s_upper or "KDV" in s_upper:
-            v = 0.0
-            for a in adaylar:
-                val = sayi_temizle(a)
-                if val > 0 and val < 500000: v = val
+        # --- DEĞER ARAMA FONKSİYONU ---
+        def yanindaki_degeri_bul(index_no):
+            # Bu satırın (kelimenin) Y koordinatı
+            mevcut_y = (raw_data[index_no][0][0][1] + raw_data[index_no][0][2][1]) / 2
             
-            if v > 0:
-                if "KDV" in s_upper: veriler['KDV'] = max(veriler['KDV'], v)
-                elif "TOPLAM" in s_upper or "MATRAH" in s_upper:
-                    if "20" in s_upper: veriler['Matrah_20'] = max(veriler['Matrah_20'], v)
-                    elif "10" in s_upper: veriler['Matrah_10'] = max(veriler['Matrah_10'], v)
-                    elif " 1 " in s_upper: veriler['Matrah_1'] = max(veriler['Matrah_1'], v)
-                    elif " 0 " in s_upper: veriler['Matrah_0'] = max(veriler['Matrah_0'], v)
+            en_iyi_deger = 0.0
+            
+            # Sonraki elemanlara bak (Aynı satırda olanları bul)
+            for j in range(index_no + 1, len(raw_data)):
+                comp_box = raw_data[j][0]
+                comp_text = raw_data[j][1][0]
+                
+                comp_y = (comp_box[0][1] + comp_box[2][1]) / 2
+                
+                # Eğer Y farkı 15 pikselden azsa, aynı satırdadır
+                if abs(mevcut_y - comp_y) < 15:
+                    val = sayi_temizle(comp_text)
+                    # Filtre: 50'den küçük tam sayıları (adetleri) alma. (12, 5 gibi)
+                    # İstisna: Matrah oranları (1, 10, 20) bu fonksiyonda aranmaz.
+                    if val > 0 and val < 500000:
+                        if not (val < 50 and float(val).is_integer()):
+                            if val > en_iyi_deger: en_iyi_deger = val
+                else:
+                    # Satır bitti, daha fazla aşağı inme (Hız için)
+                    if (comp_y - mevcut_y) > 20: break
+            return en_iyi_deger
 
+        # 1. NAKİT
+        if "NAKİT" in text or "NAKIT" in text:
+            val = yanindaki_degeri_bul(i)
+            if val > veriler['Nakit']: veriler['Nakit'] = val
+            
+        # 2. KREDİ
+        if ("KREDİ" in text or "KART" in text) and "YEMEK" not in text:
+            val = yanindaki_degeri_bul(i)
+            if val > veriler['Kredi']: veriler['Kredi'] = val
+
+        # 3. TOPLAM
+        if ("TOPLAM" in text or "GENEL" in text) and not any(x in text for x in ["KDV", "%", "VERGİ"]):
+            val = yanindaki_degeri_bul(i)
+            if val > veriler['Toplam']: veriler['Toplam'] = val
+
+        # 4. KDV / MATRAH (Özel Durum)
+        if "%" in text or "TOPLAM" in text or "KDV" in text:
+            val = yanindaki_degeri_bul(i)
+            if val > 0:
+                if "KDV" in text: veriler['KDV'] = max(veriler['KDV'], val)
+                elif "TOPLAM" in text or "MATRAH" in text:
+                    if "20" in text: veriler['Matrah_20'] = max(veriler['Matrah_20'], val)
+                    elif "10" in text: veriler['Matrah_10'] = max(veriler['Matrah_10'], val)
+                    elif " 1 " in text: veriler['Matrah_1'] = max(veriler['Matrah_1'], val)
+                    elif " 0 " in text: veriler['Matrah_0'] = max(veriler['Matrah_0'], val)
+
+    # --- FİNAL SAĞLAMA ---
     hesaplanan = veriler['Nakit'] + veriler['Kredi']
-    if hesaplanan > 0: veriler['Toplam'] = hesaplanan
-    if veriler['KDV'] > veriler['Toplam']: veriler['KDV'] = 0.0
     
-    return veriler
-
-# --- 2. YÖNTEM: YOLO AI ANALİZİ ---
-def yolo_analiz(results, img_np):
-    veriler = {'Tarih': "", 'Z_No': "", 'Toplam': 0.0, 'Nakit': 0.0, 'Kredi': 0.0, 'KDV': 0.0, 'Matrah_0': 0.0, 'Matrah_1': 0.0, 'Matrah_10': 0.0, 'Matrah_20': 0.0}
-    
-    # YOLO sonuçları üzerinden geç
-    for r in results:
-        for box in r.boxes:
-            cls_id = int(box.cls[0])
-            cls_name = detector.names[cls_id]
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            
-            # Güvenlik payı ile kes
-            h, w, _ = img_np.shape
-            y1, y2 = max(0, y1-5), min(h, y2+5)
-            x1, x2 = max(0, x1-5), min(w, x2+5)
-            cropped = img_np[y1:y2, x1:x2]
-            
-            # Okuma yap (Sadece bu bölgeyi)
-            ocr_res = reader.ocr(cropped, cls=False)
-            text = " ".join([line[1][0] for line in ocr_res[0]]) if ocr_res and ocr_res[0] else ""
-            
-            if cls_name == 'tarih': veriler['Tarih'] = text
-            elif cls_name == 'z_no': veriler['Z_No'] = re.sub(r'[^\d]', '', text)
-            elif cls_name in ['toplam', 'nakit', 'kredi']:
-                val = sayi_temizle(text)
-                if cls_name == 'toplam': veriler['Toplam'] = max(veriler['Toplam'], val)
-                elif cls_name == 'nakit': veriler['Nakit'] = max(veriler['Nakit'], val)
-                elif cls_name == 'kredi': veriler['Kredi'] = max(veriler['Kredi'], val)
-            elif 'kdv' in cls_name:
-                val = sayi_temizle(text)
-                if '10' in cls_name: veriler['Matrah_10'] = max(veriler['Matrah_10'], val)
-                elif '20' in cls_name: veriler['Matrah_20'] = max(veriler['Matrah_20'], val)
-                elif '1' in cls_name: veriler['Matrah_1'] = max(veriler['Matrah_1'], val)
-
-    if veriler['Nakit'] + veriler['Kredi'] > veriler['Toplam']:
-        veriler['Toplam'] = veriler['Nakit'] + veriler['Kredi']
+    # Eğer OCR Toplamı bulamadıysa (0 ise) veya Hesaplanan Toplam daha büyükse
+    if hesaplanan > veriler['Toplam']:
+        veriler['Toplam'] = hesaplanan
         
+    # KDV Hata Kontrolü
+    if veriler['KDV'] > veriler['Toplam']: veriler['KDV'] = 0.0
+
     return veriler
 
-# --- ARAYÜZ VE AKIŞ ---
-st.title("🎨 Z Raporu AI - V103 (Hibrid + Renkli)")
+# --- ARAYÜZ ---
+st.title("🏢 Z Raporu AI - V105 (Stabil)")
 
 uploaded_files = st.file_uploader("Fiş Yükle", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
 
 if uploaded_files and st.button("Analiz Et"):
     tum_veriler = []
-    for f in uploaded_files:
-        # 1. GÖRÜNTÜYÜ OKU (RENKLİ)
-        img = Image.open(f)
-        # PIL -> OpenCV (RGB)
-        img_rgb = np.array(img)
-        
-        # 2. GÖRÜNTÜYÜ GRİ YAP (PADDLE İÇİN)
-        img_gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
-        
-        # --------------------------------------------
-        # 1. ÖNCE YOLO'YU DENE (RGB GÖRÜNTÜ İLE!)
-        # --------------------------------------------
-        yolo_results = detector(img_rgb, conf=0.20) 
-        
-        # YOLO bir şey buldu mu?
-        if yolo_results and len(yolo_results[0].boxes) > 2:
-            # Bulduysa, kestiği parçaları okusun
-            veri = yolo_analiz(yolo_results, img_rgb)
-            veri['Metod'] = "🤖 AI"
-        else:
-            # --------------------------------------------
-            # 2. BULAMADIYSA KLASİK YÖNTEM (GRİ GÖRÜNTÜ İLE)
-            # --------------------------------------------
-            ocr_res = reader.ocr(img_gray, cls=False)
-            satirlar = paddle_sonuclari_duzenle(ocr_res)
-            veri = klasik_analiz(satirlar)
-            veri['Metod'] = "🔎 Klasik"
-        
-        veri['Dosya'] = f.name
-        if veri['Toplam'] > 0: veri['Durum'] = "✅"
-        else: veri['Durum'] = "❌"
-        tum_veriler.append(veri)
+    bar = st.progress(0)
+    
+    for i, f in enumerate(uploaded_files):
+        try:
+            img = Image.open(f)
+            # KRİTİK: Görüntüyü standartlaştır (3 Kanal RGB)
+            img_std = resmi_standartlastir(img)
+            
+            # 1. YOLO İLE DENE
+            # conf=0.25 standarttır, oynama yapmadık
+            yolo_results = detector(img_std, verbose=False) 
+            
+            # Eğer YOLO Z No veya Tutar bulduysa, o bölgeleri kesip oku
+            # (Bu kısım çok kompleks olduğu için şimdilik pas geçip direkt tam sayfaya bakacağız
+            # çünkü YOLO entegrasyonu bazen boş dönüyor, garantili yol tam sayfa okumaktır).
+            
+            # 2. PADDLE ILE TAM SAYFA OKU (EN GARANTİSİ)
+            # cls parametresini SİLDİK. Hata vermez.
+            ocr_result = reader.ocr(img_std)
+            
+            veri = verileri_isle(ocr_result, f.name)
+            
+            if veri['Toplam'] > 0: veri['Durum'] = "✅"
+            else: veri['Durum'] = "❌"
+            
+            tum_veriler.append(veri)
+            
+        except Exception as e:
+            st.error(f"Hata ({f.name}): {e}")
+            
+        bar.progress((i+1)/len(uploaded_files))
         
     df = pd.DataFrame(tum_veriler)
-    cols = ["Durum", "Metod", "Tarih", "Z_No", "Toplam", "Nakit", "Kredi", "KDV", "Matrah_0", "Matrah_1", "Matrah_10", "Matrah_20", "Dosya"]
-    st.data_editor(df[[c for c in cols if c in df.columns]])
+    if not df.empty:
+        cols = ["Durum", "Tarih", "Z_No", "Toplam", "Nakit", "Kredi", "KDV", "Matrah_0", "Matrah_1", "Matrah_10", "Matrah_20", "Dosya"]
+        st.data_editor(df[[c for c in cols if c in df.columns]], num_rows="dynamic")
+        
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False)
+        st
