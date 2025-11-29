@@ -10,7 +10,7 @@ import cv2
 import os
 
 # --- SAYFA AYARLARI ---
-st.set_page_config(page_title="Z Raporu AI (V110 - Final)", page_icon="✅", layout="wide")
+st.set_page_config(page_title="Z Raporu AI (V111 - Akıllı Ölçek)", page_icon="🧠", layout="wide")
 
 # --- MODELLERİ YÜKLE ---
 @st.cache_resource
@@ -19,7 +19,6 @@ def load_models():
         return None, None
     
     detector = YOLO('best.pt')
-    # show_log yok, sadece temel ayarlar
     reader = PaddleOCR(use_angle_cls=True, lang='tr') 
     return detector, reader
 
@@ -32,36 +31,48 @@ except Exception as e:
     st.error(f"Sistem Başlatma Hatası: {e}")
     st.stop()
 
-# --- GÖRÜNTÜ İŞLEME (GÜÇLENDİRİLMİŞ V109) ---
-def resmi_hazirla(pil_image):
+# --- GÖRÜNTÜ FORMATLAMA ---
+def resmi_standartlastir(pil_image):
     image = np.array(pil_image)
+    if len(image.shape) == 2:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+    elif image.shape[2] == 4:
+        image = cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
+    return image
+
+# --- AKILLI GÖRÜNTÜ İŞLEME (DÜZELTİLDİ) ---
+def resmi_isleyip_hazirla(img_rgb):
+    # Griye çevir
+    gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
     
-    # Renkli halini sakla (Yedek plan için)
-    if len(image.shape) == 3:
-        img_rgb = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    else:
-        img_rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        gray = image
+    # --- AKILLI ÖLÇEKLEME ---
+    # Hedef genişlik: 2000px (OCR için ideal boyut)
+    # Eğer resim küçükse büyüt, büyükse dokunma (veya küçültme)
+    height, width = gray.shape[:2]
+    target_width = 2000
     
-    # 1. Büyütme (3 Kat)
-    gray = cv2.resize(gray, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+    if width < target_width:
+        scale = target_width / width
+        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     
-    # 2. Kontrast Artırma
+    # Gürültü temizliği
+    gray = cv2.medianBlur(gray, 3)
+    
+    # Kontrast Artırma (CLAHE)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
     gray = clahe.apply(gray)
 
-    # 3. Threshold (Otsu)
+    # Threshold (Otsu)
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
-    # 4. Dilation (Yazıları Kalınlaştır - Silik 3/0 için)
+    # Dilation (Yazıları birleştir)
     kernel = np.ones((2,2), np.uint8)
     dilated = cv2.dilate(thresh, kernel, iterations=1)
     
-    # RGB'ye çevirip dön (PaddleOCR için)
+    # PaddleOCR için RGB'ye geri dön
     final_img = cv2.cvtColor(dilated, cv2.COLOR_GRAY2RGB)
     
-    return final_img, img_rgb
+    return final_img
 
 # --- SAYI TEMİZLEME ---
 def sayi_temizle(text):
@@ -118,7 +129,6 @@ def verileri_isle(ocr_results, dosya_adi):
 
     for i, item in enumerate(valid_data):
         text = item[1][0].upper()
-        
         if "KUM" in text or "KÜM" in text or "YEKÜN" in text: continue
 
         def yanindaki_degeri_bul(index_no):
@@ -131,14 +141,14 @@ def verileri_isle(ocr_results, dosya_adi):
                     comp_text = valid_data[j][1][0]
                     comp_y = (comp_box[0][1] + comp_box[2][1]) / 2
                     
-                    # Toleransı artırdık (Büyütme yüzünden)
-                    if abs(mevcut_y - comp_y) < 40:
+                    # Toleransı ölçeğe göre ayarladık
+                    if abs(mevcut_y - comp_y) < 20:
                         val = sayi_temizle(comp_text)
                         if val > 0 and val < 500000:
                             if not (val < 50 and float(val).is_integer()):
                                 if val > en_iyi_deger: en_iyi_deger = val
                     else:
-                        if (comp_y - mevcut_y) > 60: break
+                        if (comp_y - mevcut_y) > 30: break
                 return en_iyi_deger
             except:
                 return 0.0
@@ -165,6 +175,7 @@ def verileri_isle(ocr_results, dosya_adi):
                     elif " 1 " in text: veriler['Matrah_1'] = max(veriler['Matrah_1'], val)
                     elif " 0 " in text: veriler['Matrah_0'] = max(veriler['Matrah_0'], val)
 
+    # FİNAL SAĞLAMA
     hesaplanan = veriler['Nakit'] + veriler['Kredi']
     if hesaplanan > veriler['Toplam']: veriler['Toplam'] = hesaplanan
     if veriler['KDV'] > veriler['Toplam']: veriler['KDV'] = 0.0
@@ -172,7 +183,7 @@ def verileri_isle(ocr_results, dosya_adi):
     return veriler
 
 # --- ARAYÜZ ---
-st.title("✅ Z Raporu AI - V110 (Hatasız Paddle)")
+st.title("🧠 Z Raporu AI - V111 (Akıllı Ölçek)")
 
 uploaded_files = st.file_uploader("Fiş Yükle", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
 
@@ -183,20 +194,13 @@ if uploaded_files and st.button("Analiz Et"):
     for i, f in enumerate(uploaded_files):
         try:
             img = Image.open(f)
+            img_std = resmi_standartlastir(img)
             
-            # 1. İşlenmiş Görüntüyle Dene (3x Zoom + Kalınlaştırma)
-            img_processed, img_org = resmi_hazirla(img)
+            # Akıllı Ölçekleme ve İşleme
+            img_processed = resmi_isleyip_hazirla(img_std)
             
-            # BURASI DÜZELTİLDİ: cls parametresi silindi!
             ocr_result = reader.ocr(img_processed)
-            
             veri = verileri_isle(ocr_result, f.name)
-            
-            # 2. Eğer Sonuç Kötüyse, Orijinalle Dene
-            if veri['Toplam'] == 0:
-                # Orijinal (Renkli) görüntüyle dene
-                ocr_result_org = reader.ocr(img_org)
-                veri = verileri_isle(ocr_result_org, f.name)
             
             if veri['Toplam'] > 0: veri['Durum'] = "✅"
             else: veri['Durum'] = "❌"
