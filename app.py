@@ -10,71 +10,42 @@ import cv2
 import os
 
 # --- SAYFA AYARLARI ---
-st.set_page_config(page_title="Z Raporu AI (V111 - Akıllı Ölçek)", page_icon="🧠", layout="wide")
+st.set_page_config(page_title="Z Raporu AI (V112 - Final)", page_icon="✅", layout="wide")
 
-# --- MODELLERİ YÜKLE ---
+# --- 1. MODELLERİ YÜKLE ---
 @st.cache_resource
 def load_models():
-    if not os.path.exists("best.pt"):
-        return None, None
+    # YOLO Kontrolü (Varsa yükle, yoksa geç)
+    detector = None
+    if os.path.exists("best.pt"):
+        detector = YOLO('best.pt')
     
-    detector = YOLO('best.pt')
+    # PaddleOCR Yükle (Hata veren parametreler silindi)
     reader = PaddleOCR(use_angle_cls=True, lang='tr') 
+    
     return detector, reader
 
 try:
     detector, reader = load_models()
-    if detector is None:
-        st.error("⚠️ 'best.pt' dosyası bulunamadı!")
-        st.stop()
 except Exception as e:
     st.error(f"Sistem Başlatma Hatası: {e}")
     st.stop()
 
-# --- GÖRÜNTÜ FORMATLAMA ---
+# --- 2. GÖRÜNTÜ FORMATLAMA ---
 def resmi_standartlastir(pil_image):
+    # PIL -> Numpy
     image = np.array(pil_image)
+    
+    # Eğer Gri ise RGB yap
     if len(image.shape) == 2:
         image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+    # Eğer PNG (4 kanal) ise RGB yap
     elif image.shape[2] == 4:
         image = cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
+        
     return image
 
-# --- AKILLI GÖRÜNTÜ İŞLEME (DÜZELTİLDİ) ---
-def resmi_isleyip_hazirla(img_rgb):
-    # Griye çevir
-    gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
-    
-    # --- AKILLI ÖLÇEKLEME ---
-    # Hedef genişlik: 2000px (OCR için ideal boyut)
-    # Eğer resim küçükse büyüt, büyükse dokunma (veya küçültme)
-    height, width = gray.shape[:2]
-    target_width = 2000
-    
-    if width < target_width:
-        scale = target_width / width
-        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    
-    # Gürültü temizliği
-    gray = cv2.medianBlur(gray, 3)
-    
-    # Kontrast Artırma (CLAHE)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    gray = clahe.apply(gray)
-
-    # Threshold (Otsu)
-    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    
-    # Dilation (Yazıları birleştir)
-    kernel = np.ones((2,2), np.uint8)
-    dilated = cv2.dilate(thresh, kernel, iterations=1)
-    
-    # PaddleOCR için RGB'ye geri dön
-    final_img = cv2.cvtColor(dilated, cv2.COLOR_GRAY2RGB)
-    
-    return final_img
-
-# --- SAYI TEMİZLEME ---
+# --- 3. SAYI TEMİZLEME ---
 def sayi_temizle(text):
     if not text: return 0.0
     try:
@@ -92,7 +63,7 @@ def sayi_temizle(text):
         pass
     return 0.0
 
-# --- ANALİZ MOTORU ---
+# --- 4. ANALİZ MOTORU ---
 def verileri_isle(ocr_results, dosya_adi):
     veriler = {
         'Dosya': dosya_adi,
@@ -100,12 +71,15 @@ def verileri_isle(ocr_results, dosya_adi):
         'KDV': 0.0, 'Matrah_0': 0.0, 'Matrah_1': 0.0, 'Matrah_10': 0.0, 'Matrah_20': 0.0
     }
     
-    if not ocr_results or ocr_results[0] is None: return veriler
+    # Boş sonuç kontrolü
+    if not ocr_results or ocr_results[0] is None:
+        return veriler
 
     raw_data = ocr_results[0]
+    
+    # Veriyi temizle
     valid_data = []
     text_list = []
-
     for item in raw_data:
         if isinstance(item, (list, tuple)) and len(item) >= 2:
             text = item[1][0]
@@ -124,25 +98,26 @@ def verileri_isle(ocr_results, dosya_adi):
     zno = re.search(r'(?:Z\s*NO|SAYAÇ|RAPOR\s*NO)\D{0,5}(\d+)', full_text)
     if zno: veriler['Z_No'] = zno.group(1)
 
-    # B. PARA ANALİZİ
+    # B. PARA ANALİZİ (KOORDİNATLI)
+    # Yüksekliğe göre sırala
     valid_data = sorted(valid_data, key=lambda x: x[0][0][1])
 
     for i, item in enumerate(valid_data):
+        bbox = item[0]
         text = item[1][0].upper()
+        
         if "KUM" in text or "KÜM" in text or "YEKÜN" in text: continue
 
         def yanindaki_degeri_bul(index_no):
             try:
                 mevcut_y = (valid_data[index_no][0][0][1] + valid_data[index_no][0][2][1]) / 2
                 en_iyi_deger = 0.0
-                
                 for j in range(index_no + 1, len(valid_data)):
                     comp_box = valid_data[j][0]
                     comp_text = valid_data[j][1][0]
                     comp_y = (comp_box[0][1] + comp_box[2][1]) / 2
                     
-                    # Toleransı ölçeğe göre ayarladık
-                    if abs(mevcut_y - comp_y) < 20:
+                    if abs(mevcut_y - comp_y) < 20: # Tolerans
                         val = sayi_temizle(comp_text)
                         if val > 0 and val < 500000:
                             if not (val < 50 and float(val).is_integer()):
@@ -183,7 +158,7 @@ def verileri_isle(ocr_results, dosya_adi):
     return veriler
 
 # --- ARAYÜZ ---
-st.title("🧠 Z Raporu AI - V111 (Akıllı Ölçek)")
+st.title("✅ Z Raporu AI - V112 (Hatasız)")
 
 uploaded_files = st.file_uploader("Fiş Yükle", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
 
@@ -196,10 +171,10 @@ if uploaded_files and st.button("Analiz Et"):
             img = Image.open(f)
             img_std = resmi_standartlastir(img)
             
-            # Akıllı Ölçekleme ve İşleme
-            img_processed = resmi_isleyip_hazirla(img_std)
+            # --- BURASI DÜZELTİLDİ (PARAMETRESİZ) ---
+            ocr_result = reader.ocr(img_std)
+            # ----------------------------------------
             
-            ocr_result = reader.ocr(img_processed)
             veri = verileri_isle(ocr_result, f.name)
             
             if veri['Toplam'] > 0: veri['Durum'] = "✅"
@@ -214,7 +189,9 @@ if uploaded_files and st.button("Analiz Et"):
     df = pd.DataFrame(tum_veriler)
     if not df.empty:
         cols = ["Durum", "Tarih", "Z_No", "Toplam", "Nakit", "Kredi", "KDV", "Matrah_0", "Matrah_1", "Matrah_10", "Matrah_20", "Dosya"]
-        st.data_editor(df[[c for c in cols if c in df.columns]], num_rows="dynamic")
+        # Sütunları kontrol et ve varsa göster
+        mevcut_cols = [c for c in cols if c in df.columns]
+        st.data_editor(df[mevcut_cols], num_rows="dynamic")
         
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
