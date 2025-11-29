@@ -10,16 +10,19 @@ import cv2
 import os
 
 # --- SAYFA AYARLARI ---
-st.set_page_config(page_title="Z Raporu AI (V102 - Hibrid)", page_icon="🪂", layout="wide")
+st.set_page_config(page_title="Z Raporu AI (V103 - Renk Uzmanı)", page_icon="🎨", layout="wide")
 
 # --- MODELLERİ YÜKLE ---
 @st.cache_resource
 def load_models():
     if not os.path.exists("best.pt"):
-        st.error("⚠️ 'best.pt' bulunamadı!")
+        st.error("⚠️ 'best.pt' dosyası bulunamadı! Lütfen GitHub'a yükleyin.")
         st.stop()
     
+    # YOLO'yu CPU modunda başlat (Sunucu dostu)
     detector = YOLO('best.pt')
+    
+    # PaddleOCR
     reader = PaddleOCR(use_angle_cls=True, lang='tr')
     return detector, reader
 
@@ -45,7 +48,7 @@ def sayi_temizle(text):
         pass
     return 0.0
 
-# --- 1. YÖNTEM: KLASİK ANALİZ (YEDEK PARAŞÜT) ---
+# --- 1. YÖNTEM: KLASİK ANALİZ (YEDEK) ---
 def paddle_sonuclari_duzenle(results):
     if not results or results[0] is None: return []
     sorted_res = sorted(results[0], key=lambda x: x[0][0][1])
@@ -92,7 +95,7 @@ def klasik_analiz(satirlar):
                 v = sayi_temizle(a)
                 if v > 0 and v < 500000:
                     if not (v < 50 and float(v).is_integer()): veriler['Nakit'] = max(veriler['Nakit'], v)
-            if i+1 < len(satirlar): # Alt satır
+            if i+1 < len(satirlar):
                 for a in re.findall(r'[\d\.,]+', satirlar[i+1]):
                     v = sayi_temizle(a)
                     if v > 0 and v < 500000 and not (v < 50 and float(v).is_integer()): veriler['Nakit'] = max(veriler['Nakit'], v)
@@ -120,7 +123,6 @@ def klasik_analiz(satirlar):
                     elif " 1 " in s_upper: veriler['Matrah_1'] = max(veriler['Matrah_1'], v)
                     elif " 0 " in s_upper: veriler['Matrah_0'] = max(veriler['Matrah_0'], v)
 
-    # Toplam Tutar Sağlaması
     hesaplanan = veriler['Nakit'] + veriler['Kredi']
     if hesaplanan > 0: veriler['Toplam'] = hesaplanan
     if veriler['KDV'] > veriler['Toplam']: veriler['KDV'] = 0.0
@@ -131,19 +133,20 @@ def klasik_analiz(satirlar):
 def yolo_analiz(results, img_np):
     veriler = {'Tarih': "", 'Z_No': "", 'Toplam': 0.0, 'Nakit': 0.0, 'Kredi': 0.0, 'KDV': 0.0, 'Matrah_0': 0.0, 'Matrah_1': 0.0, 'Matrah_10': 0.0, 'Matrah_20': 0.0}
     
+    # YOLO sonuçları üzerinden geç
     for r in results:
         for box in r.boxes:
             cls_id = int(box.cls[0])
             cls_name = detector.names[cls_id]
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             
-            # Crop
+            # Güvenlik payı ile kes
             h, w, _ = img_np.shape
             y1, y2 = max(0, y1-5), min(h, y2+5)
             x1, x2 = max(0, x1-5), min(w, x2+5)
             cropped = img_np[y1:y2, x1:x2]
             
-            # Oku
+            # Okuma yap (Sadece bu bölgeyi)
             ocr_res = reader.ocr(cropped, cls=False)
             text = " ".join([line[1][0] for line in ocr_res[0]]) if ocr_res and ocr_res[0] else ""
             
@@ -166,27 +169,36 @@ def yolo_analiz(results, img_np):
     return veriler
 
 # --- ARAYÜZ VE AKIŞ ---
-st.title("🪂 Z Raporu AI - V102 (Hibrid)")
+st.title("🎨 Z Raporu AI - V103 (Hibrid + Renkli)")
 
 uploaded_files = st.file_uploader("Fiş Yükle", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
 
 if uploaded_files and st.button("Analiz Et"):
     tum_veriler = []
     for f in uploaded_files:
+        # 1. GÖRÜNTÜYÜ OKU (RENKLİ)
         img = Image.open(f)
-        img_np = np.array(img)
-        if len(img_np.shape) == 3: img_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+        # PIL -> OpenCV (RGB)
+        img_rgb = np.array(img)
         
-        # 1. ÖNCE YOLO'YU DENE
-        yolo_results = detector(img_np, conf=0.20) # Eşik değerini düşürdük (Daha hassas)
+        # 2. GÖRÜNTÜYÜ GRİ YAP (PADDLE İÇİN)
+        img_gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+        
+        # --------------------------------------------
+        # 1. ÖNCE YOLO'YU DENE (RGB GÖRÜNTÜ İLE!)
+        # --------------------------------------------
+        yolo_results = detector(img_rgb, conf=0.20) 
         
         # YOLO bir şey buldu mu?
-        if yolo_results and len(yolo_results[0].boxes) > 2: # En az 3 kutu bulmalı (Z No, Tarih, Tutar)
-            veri = yolo_analiz(yolo_results, img_np)
+        if yolo_results and len(yolo_results[0].boxes) > 2:
+            # Bulduysa, kestiği parçaları okusun
+            veri = yolo_analiz(yolo_results, img_rgb)
             veri['Metod'] = "🤖 AI"
         else:
-            # BULAMADIYSA KLASİK YÖNTEME GEÇ (YEDEK PARAŞÜT)
-            ocr_res = reader.ocr(img_np, cls=False)
+            # --------------------------------------------
+            # 2. BULAMADIYSA KLASİK YÖNTEM (GRİ GÖRÜNTÜ İLE)
+            # --------------------------------------------
+            ocr_res = reader.ocr(img_gray, cls=False)
             satirlar = paddle_sonuclari_duzenle(ocr_res)
             veri = klasik_analiz(satirlar)
             veri['Metod'] = "🔎 Klasik"
