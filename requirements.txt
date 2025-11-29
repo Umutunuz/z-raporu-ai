@@ -2,6 +2,8 @@ streamlit
 pandas
 numpy
 opencv-python-headless
-pytesseract
-XlsxWriter
+paddlepaddle
+paddleocr
 ultralytics
+XlsxWriter
+pytesseract
