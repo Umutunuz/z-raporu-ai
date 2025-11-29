@@ -10,7 +10,7 @@ import cv2
 import os
 
 # --- SAYFA AYARLARI ---
-st.set_page_config(page_title="Z Raporu AI (V109 - Net Görüş)", page_icon="🌟", layout="wide")
+st.set_page_config(page_title="Z Raporu AI (V110 - Final)", page_icon="✅", layout="wide")
 
 # --- MODELLERİ YÜKLE ---
 @st.cache_resource
@@ -19,6 +19,7 @@ def load_models():
         return None, None
     
     detector = YOLO('best.pt')
+    # show_log yok, sadece temel ayarlar
     reader = PaddleOCR(use_angle_cls=True, lang='tr') 
     return detector, reader
 
@@ -31,27 +32,29 @@ except Exception as e:
     st.error(f"Sistem Başlatma Hatası: {e}")
     st.stop()
 
-# --- GÖRÜNTÜ İŞLEME (GÜÇLENDİRİLMİŞ) ---
+# --- GÖRÜNTÜ İŞLEME (GÜÇLENDİRİLMİŞ V109) ---
 def resmi_hazirla(pil_image):
     image = np.array(pil_image)
     
     # Renkli halini sakla (Yedek plan için)
-    img_rgb = cv2.cvtColor(image, cv2.COLOR_RGB2BGR) if len(image.shape) == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    
-    # Griye çevir
-    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY) if len(image.shape) == 3 else image
+    if len(image.shape) == 3:
+        img_rgb = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    else:
+        img_rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        gray = image
     
     # 1. Büyütme (3 Kat)
     gray = cv2.resize(gray, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
     
-    # 2. Kontrast Artırma (CLAHE)
+    # 2. Kontrast Artırma
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
     gray = clahe.apply(gray)
 
     # 3. Threshold (Otsu)
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
-    # 4. Dilation (Yazıları Kalınlaştır)
+    # 4. Dilation (Yazıları Kalınlaştır - Silik 3/0 için)
     kernel = np.ones((2,2), np.uint8)
     dilated = cv2.dilate(thresh, kernel, iterations=1)
     
@@ -114,7 +117,6 @@ def verileri_isle(ocr_results, dosya_adi):
     valid_data = sorted(valid_data, key=lambda x: x[0][0][1])
 
     for i, item in enumerate(valid_data):
-        bbox = item[0]
         text = item[1][0].upper()
         
         if "KUM" in text or "KÜM" in text or "YEKÜN" in text: continue
@@ -129,7 +131,7 @@ def verileri_isle(ocr_results, dosya_adi):
                     comp_text = valid_data[j][1][0]
                     comp_y = (comp_box[0][1] + comp_box[2][1]) / 2
                     
-                    # Toleransı artırdık (3 kat büyüttüğümüz için)
+                    # Toleransı artırdık (Büyütme yüzünden)
                     if abs(mevcut_y - comp_y) < 40:
                         val = sayi_temizle(comp_text)
                         if val > 0 and val < 500000:
@@ -170,7 +172,7 @@ def verileri_isle(ocr_results, dosya_adi):
     return veriler
 
 # --- ARAYÜZ ---
-st.title("🌟 Z Raporu AI - V109 (Görüntü İyileştirme)")
+st.title("✅ Z Raporu AI - V110 (Hatasız Paddle)")
 
 uploaded_files = st.file_uploader("Fiş Yükle", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
 
@@ -182,14 +184,18 @@ if uploaded_files and st.button("Analiz Et"):
         try:
             img = Image.open(f)
             
-            # 1. İşlenmiş Görüntüyle Dene
+            # 1. İşlenmiş Görüntüyle Dene (3x Zoom + Kalınlaştırma)
             img_processed, img_org = resmi_hazirla(img)
-            ocr_result = reader.ocr(img_processed, cls=False)
+            
+            # BURASI DÜZELTİLDİ: cls parametresi silindi!
+            ocr_result = reader.ocr(img_processed)
+            
             veri = verileri_isle(ocr_result, f.name)
             
-            # 2. Eğer Sonuç Kötüyse, Orijinalle Dene (Yedek Plan)
+            # 2. Eğer Sonuç Kötüyse, Orijinalle Dene
             if veri['Toplam'] == 0:
-                ocr_result_org = reader.ocr(img_org, cls=False)
+                # Orijinal (Renkli) görüntüyle dene
+                ocr_result_org = reader.ocr(img_org)
                 veri = verileri_isle(ocr_result_org, f.name)
             
             if veri['Toplam'] > 0: veri['Durum'] = "✅"
